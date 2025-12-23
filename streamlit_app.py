@@ -296,8 +296,57 @@ def noise_title(run_name: str, noise_val) -> str:
         return "Noise Levels: N/A"
     return "Noise Levels: " + ",".join(str(x) for x in sorted(lv))
 
-def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame):
+def infer_type_from_name(name: str) -> str:
+    s = str(name).upper()
+    if "CND" in s:
+        return "Conduit"
+    if "LT" in s:
+        return "Tray"
+    return "Node"
+
+def build_adjacency(connections_df: pd.DataFrame) -> dict[str, set[str]]:
+    adj = defaultdict(set)
+    if connections_df is None or connections_df.empty:
+        return adj
+    if "From" not in connections_df.columns or "To" not in connections_df.columns:
+        return adj
+    for _, r in connections_df.iterrows():
+        a = r.get("From", None)
+        b = r.get("To", None)
+        if pd.isna(a) or pd.isna(b):
+            continue
+        a = str(a).strip()
+        b = str(b).strip()
+        if not a or not b:
+            continue
+        adj[a].add(b)
+        adj[b].add(a)
+    return adj
+
+def neighborhood_nodes(adj: dict[str, set[str]], start: str, depth: int) -> set[str]:
+    start = str(start).strip()
+    if not start:
+        return set()
+    seen = {start}
+    frontier = {start}
+    for _ in range(max(0, int(depth))):
+        nxt = set()
+        for u in frontier:
+            nxt |= set(adj.get(u, set()))
+        nxt -= seen
+        seen |= nxt
+        frontier = nxt
+        if not frontier:
+            break
+    return seen
+
+def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, focus_node: str | None = None, focus_depth: int = 2):
     tray_df = ensure_xy_columns(tray_df)
+
+    focus_set = None
+    if focus_node:
+        adj = build_adjacency(connections_df)
+        focus_set = neighborhood_nodes(adj, focus_node, focus_depth)
 
     nodes = []
     for _, r in tray_df.iterrows():
@@ -306,12 +355,21 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame):
             continue
         rn = str(rn).strip()
 
+        if focus_set is not None and rn not in focus_set:
+            continue
+
+        is_focus = (focus_node is not None and rn == str(focus_node).strip())
+
         node = {
             "id": rn,
             "label": rn,
             "title": noise_title(rn, r.get("Noise Level", "")),
             "shape": "dot",
+            "size": 18,
         }
+
+        if is_focus:
+            node["color"] = {"background": "#FFD700", "border": "#000000"}
 
         x = r.get("X", pd.NA)
         y = r.get("Y", pd.NA)
@@ -330,9 +388,11 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame):
 
         nodes.append(node)
 
+    node_ids = {n["id"] for n in nodes}
+
     edges = []
     seen = set()
-    if connections_df is not None and not connections_df.empty:
+    if connections_df is not None and not connections_df.empty and "From" in connections_df.columns and "To" in connections_df.columns:
         for _, r in connections_df.iterrows():
             a = r.get("From", None)
             b = r.get("To", None)
@@ -342,11 +402,22 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame):
             b = str(b).strip()
             if not a or not b:
                 continue
+            if a not in node_ids or b not in node_ids:
+                continue
             key = tuple(sorted((a, b)))
             if key in seen:
                 continue
             seen.add(key)
-            edges.append({"from": a, "to": b})
+
+            # IMPORTANT:
+            # Some builds of streamlit_vis_network return selected edges as [from,to] instead of "id".
+            # We still set id (for stability), but selection parsing must handle list-form too.
+            edges.append({
+                "id": f"{a}|||{b}",
+                "from": a,
+                "to": b,
+                "title": f"{a} ↔ {b}",
+            })
 
     return nodes, edges
 
@@ -381,6 +452,151 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
 
 
 # ============================================================
+# DataFrame mutation helpers
+# ============================================================
+
+def df_delete_node(tray_df, connections_df, endpoints_df, node: str):
+    node = str(node).strip()
+    tray_df2 = tray_df.copy()
+    tray_df2 = tray_df2[tray_df2["RunName"].astype(str).str.strip() != node].reset_index(drop=True)
+
+    con2 = connections_df.copy()
+    if "From" in con2.columns and "To" in con2.columns:
+        con2 = con2[
+            (con2["From"].astype(str).str.strip() != node) &
+            (con2["To"].astype(str).str.strip() != node)
+        ].reset_index(drop=True)
+
+    ep2 = endpoints_df.copy()
+    if "tray/conduit(s)" in ep2.columns:
+        def remove_token(s):
+            parts = [p.strip() for p in str(s).split(",") if p.strip()]
+            parts = [p for p in parts if p != node]
+            return ",".join(parts)
+        ep2["tray/conduit(s)"] = ep2["tray/conduit(s)"].apply(remove_token)
+
+    return tray_df2, con2, ep2
+
+def df_delete_edge(connections_df, a: str, b: str):
+    aa = str(a).strip()
+    bb = str(b).strip()
+    con = connections_df.copy()
+
+    def is_match(r):
+        x = str(r.get("From", "")).strip()
+        y = str(r.get("To", "")).strip()
+        return set([x, y]) == set([aa, bb])
+
+    if ("From" in con.columns) and ("To" in con.columns):
+        mask = con.apply(is_match, axis=1)
+        con = con[~mask].reset_index(drop=True)
+    return con
+
+def df_rename_node(tray_df, connections_df, endpoints_df, old: str, new: str):
+    old = str(old).strip()
+    new = str(new).strip()
+    if not old or not new or old == new:
+        return tray_df, connections_df, endpoints_df
+
+    t = tray_df.copy()
+    mask = t["RunName"].astype(str).str.strip() == old
+    if mask.any():
+        t.loc[mask, "RunName"] = new
+
+    c = connections_df.copy()
+    if "From" in c.columns:
+        c.loc[c["From"].astype(str).str.strip() == old, "From"] = new
+    if "To" in c.columns:
+        c.loc[c["To"].astype(str).str.strip() == old, "To"] = new
+
+    e = endpoints_df.copy()
+    if "tray/conduit(s)" in e.columns:
+        def rename_token(s):
+            parts = [p.strip() for p in str(s).split(",") if p.strip()]
+            parts = [new if p == old else p for p in parts]
+            return ",".join(parts)
+        e["tray/conduit(s)"] = e["tray/conduit(s)"].apply(rename_token)
+
+    return t, c, e
+
+def df_duplicate_node(tray_df, source_name: str, new_name: str):
+    source_name = str(source_name).strip()
+    new_name = str(new_name).strip()
+    if not source_name or not new_name:
+        return tray_df
+    df = ensure_xy_columns(tray_df.copy())
+
+    if (df["RunName"].astype(str).str.strip() == new_name).any():
+        return df
+
+    src_mask = df["RunName"].astype(str).str.strip() == source_name
+    if not src_mask.any():
+        return df
+
+    src_row = df[src_mask].iloc[0].to_dict()
+    src_row["RunName"] = new_name
+
+    try:
+        if not pd.isna(src_row.get("X")):
+            src_row["X"] = float(src_row["X"]) + 50.0
+        if not pd.isna(src_row.get("Y")):
+            src_row["Y"] = float(src_row["Y"]) + 50.0
+    except Exception:
+        pass
+
+    df = pd.concat([df, pd.DataFrame([src_row])], ignore_index=True)
+    return df
+
+
+# ============================================================
+# Selection parsing helper (FIX FOR EDGE DELETE)
+# ============================================================
+
+def parse_selected_edge(sel_edge) -> tuple[str | None, str | None, str]:
+    """
+    streamlit_vis_network edge selection is inconsistent across versions:
+      - Sometimes: "A|||B" (string id)
+      - Sometimes: ["A","B"] (list/tuple endpoints)  <-- what you're seeing
+      - Sometimes: {"from": "...", "to": "..."} (dict)
+    This normalizes to (a, b, display_text).
+    """
+    if sel_edge is None:
+        return None, None, "None"
+
+    # dict with from/to
+    if isinstance(sel_edge, dict):
+        a = str(sel_edge.get("from", "")).strip()
+        b = str(sel_edge.get("to", "")).strip()
+        if a and b:
+            return a, b, f"{a} ↔ {b}"
+        # maybe has id
+        sid = sel_edge.get("id")
+        if isinstance(sid, str) and "|||" in sid:
+            x, y = sid.split("|||", 1)
+            return x.strip(), y.strip(), f"{x.strip()} ↔ {y.strip()}"
+        return None, None, str(sel_edge)
+
+    # list/tuple like ["A","B"]
+    if isinstance(sel_edge, (list, tuple)):
+        if len(sel_edge) >= 2:
+            a = str(sel_edge[0]).strip()
+            b = str(sel_edge[1]).strip()
+            if a and b:
+                return a, b, f"{a} ↔ {b}"
+        return None, None, str(sel_edge)
+
+    # string
+    if isinstance(sel_edge, str):
+        s = sel_edge.strip()
+        if "|||" in s:
+            x, y = s.split("|||", 1)
+            return x.strip(), y.strip(), f"{x.strip()} ↔ {y.strip()}"
+        return None, None, s
+
+    return None, None, str(sel_edge)
+
+
+# ============================================================
 # Streamlit UI
 # ============================================================
 
@@ -400,6 +616,28 @@ st.session_state.setdefault("cables_df", None)
 st.session_state.setdefault("routes_df", None)
 st.session_state.setdefault("upload_hash", None)
 
+st.session_state.setdefault("sel_nodes", [])
+st.session_state.setdefault("sel_edges", [])
+
+st.session_state.setdefault("focus_node", None)
+st.session_state.setdefault("focus_depth", 2)
+
+GRAPH_HEIGHT = 740
+
+st.markdown(
+    """
+    <style>
+      div[data-testid="stVerticalBlockBorderWrapper"]{
+        border-radius: 10px !important;
+      }
+      /* Stretch component iframes inside our wrapper (helps fullscreen width) */
+      .graphwrap, .graphwrap > div { width: 100% !important; }
+      .graphwrap iframe { width: 100% !important; min-width: 100% !important; display: block !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.tray_df = None
     st.session_state.connections_df = None
@@ -407,21 +645,31 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.cables_df = None
     st.session_state.routes_df = None
     st.session_state.upload_hash = None
+    st.session_state.sel_nodes = []
+    st.session_state.sel_edges = []
+    st.session_state.focus_node = None
     st.session_state.uploader_key_v += 1
     st.rerun()
 
 if uploaded is not None:
-    file_bytes = uploaded.getvalue()
-    this_hash = hashlib.md5(file_bytes).hexdigest()
-    if st.session_state.upload_hash != this_hash:
-        loaded = load_excel_to_dfs(file_bytes)
-        st.session_state.tray_df = ensure_xy_columns(loaded["Tray"])
-        st.session_state.connections_df = loaded["Connections"]
-        st.session_state.endpoints_df = loaded["Endpoints"]
-        st.session_state.cables_df = loaded["Cables(input)"]
-        st.session_state.routes_df = None
-        st.session_state.upload_hash = this_hash
-        st.sidebar.success("Workbook loaded.")
+    try:
+        file_bytes = uploaded.getvalue()
+        this_hash = hashlib.md5(file_bytes).hexdigest()
+        if st.session_state.upload_hash != this_hash:
+            loaded = load_excel_to_dfs(file_bytes)
+            st.session_state.tray_df = ensure_xy_columns(loaded["Tray"])
+            st.session_state.connections_df = loaded["Connections"]
+            st.session_state.endpoints_df = loaded["Endpoints"]
+            st.session_state.cables_df = loaded["Cables(input)"]
+            st.session_state.routes_df = None
+            st.session_state.upload_hash = this_hash
+            st.session_state.sel_nodes = []
+            st.session_state.sel_edges = []
+            st.session_state.focus_node = None
+            st.sidebar.success("Workbook loaded.")
+    except Exception as e:
+        st.sidebar.error(f"Failed to load workbook: {e}")
+        st.stop()
 
 if st.session_state.tray_df is None:
     st.info("Upload an Excel workbook to begin.")
@@ -486,176 +734,405 @@ with tab4:
 
 with tabG:
     st.subheader("Graph Editor")
-    st.caption("Drag nodes freely (circles, labels below, hover shows noise levels). Save positions when you want.")
+    st.caption("Select a node/edge to edit it on the right. Use Search to focus/highlight a node.")
 
     graph_col, tools_col = st.columns([3, 1], gap="large")
 
+    node_names = (
+        st.session_state.tray_df["RunName"]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    node_names = sorted(node_names, key=lambda s: s.lower())
+
     with graph_col:
-        nodes, edges = build_vis_nodes_edges(st.session_state.tray_df, st.session_state.connections_df)
+        graph_box = st.container(border=True)
+        with graph_box:
+            st.markdown('<div class="graphwrap">', unsafe_allow_html=True)
 
-        options = {
-            "physics": {"enabled": False},
-            "interaction": {
-                "dragNodes": True,
-                "dragView": True,
-                "zoomView": True,
-                "hover": True,
-            },
-            "nodes": {
-                "shape": "dot",
-                "size": 18,
-                "font": {
-                    "vadjust": 24,  # label below node
+            nodes, edges = build_vis_nodes_edges(
+                st.session_state.tray_df,
+                st.session_state.connections_df,
+                focus_node=st.session_state.focus_node,
+                focus_depth=int(st.session_state.focus_depth),
+            )
+
+            options = {
+                "physics": {"enabled": False},
+                "interaction": {
+                    "dragNodes": True,
+                    "dragView": True,
+                    "zoomView": True,
+                    "hover": True,
+                    "multiselect": False,
+                    "selectConnectedEdges": True,
                 },
-            },
-            # Straight edges always
-            "edges": {"smooth": False},
-        }
+                "nodes": {
+                    "shape": "dot",
+                    "size": 18,
+                    "font": {"vadjust": 24},
+                },
+                "edges": {"smooth": False},
+            }
 
-        selection = streamlit_vis_network(
-            nodes,
-            edges,
-            height=740,
-            width=1200,
-            options=options,
-            key="vis_network_graph",
-        )
+            # NOTE: no fixed width so it expands to container
+            selection = streamlit_vis_network(
+                nodes,
+                edges,
+                height=GRAPH_HEIGHT,
+                options=options,
+                key="vis_network_graph",
+            )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if selection:
+            try:
+                sel_nodes, sel_edges, _pos = selection
+            except Exception:
+                sel_nodes, sel_edges = [], []
+            st.session_state.sel_nodes = sel_nodes or []
+            st.session_state.sel_edges = sel_edges or []
+        else:
+            st.session_state.sel_nodes = []
+            st.session_state.sel_edges = []
 
     with tools_col:
-        st.markdown("### Edit tools")
+        tools_box = st.container(height=GRAPH_HEIGHT, border=True)
+        with tools_box:
+            # ====================================================
+            # Selection (ALWAYS TOP)
+            # ====================================================
+            st.markdown("### Selection")
 
-        st.markdown("**Layout**")
-        if st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch"):
-            positions = None
-            selected_nodes = []
-            selected_edges = []
+            sel_nodes = st.session_state.sel_nodes or []
+            sel_edges = st.session_state.sel_edges or []
 
-            if selection:
-                try:
-                    selected_nodes, selected_edges, positions = selection
-                except Exception:
-                    positions = None
+            if sel_nodes:
+                node_id = str(sel_nodes[0]).strip()
+                tdf = st.session_state.tray_df
+                row = tdf[tdf["RunName"].astype(str).str.strip() == node_id]
+                noise_val = ""
+                x_val = y_val = None
+                if not row.empty:
+                    noise_val = row.iloc[0].get("Noise Level", "")
+                    x_val = row.iloc[0].get("X", pd.NA)
+                    y_val = row.iloc[0].get("Y", pd.NA)
 
-            if positions and isinstance(positions, dict) and len(positions) > 0:
-                st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
-                st.success(f"Saved positions for {len(positions)} node(s). You can keep dragging and save again anytime.")
-                st.rerun()
-            else:
-                # Helpful warning explaining the common selection issue
-                if selected_nodes or selected_edges:
-                    st.warning(
-                        "Positions could not be captured because something is selected.\n\n"
-                        "✅ Click an empty area of the graph to deselect (select the graph), then click **Save** again."
+                st.markdown("**Selected Node**")
+                st.write(f"**Name:** {node_id}")
+                st.write(f"**Type:** {infer_type_from_name(node_id)}")
+                st.write(f"**Noise Level:** {noise_val if str(noise_val).strip() else 'N/A'}")
+                st.write(f"**Size:** 18")
+                st.write(f"**X:** {'' if pd.isna(x_val) else x_val}")
+                st.write(f"**Y:** {'' if pd.isna(y_val) else y_val}")
+
+                st.divider()
+
+                if st.button("Delete node", key="sel_delete_node", width="stretch"):
+                    t, c, e = df_delete_node(
+                        st.session_state.tray_df,
+                        st.session_state.connections_df,
+                        st.session_state.endpoints_df,
+                        node_id
                     )
+                    st.session_state.tray_df = ensure_xy_columns(t)
+                    st.session_state.connections_df = c
+                    st.session_state.endpoints_df = e
+                    st.session_state.routes_df = None
+                    if st.session_state.focus_node == node_id:
+                        st.session_state.focus_node = None
+                    st.session_state.sel_nodes = []
+                    st.session_state.sel_edges = []
+                    st.success("Node deleted.")
+                    st.rerun()
+
+                st.markdown("**Rename**")
+                new_name = st.text_input("New name", value=node_id, key="sel_rename_node_new")
+                if st.button("Rename node", key="sel_rename_node_btn", width="stretch"):
+                    if new_name.strip() and new_name.strip() != node_id:
+                        if (st.session_state.tray_df["RunName"].astype(str).str.strip() == new_name.strip()).any():
+                            st.error("That name already exists.")
+                        else:
+                            t, c, e = df_rename_node(
+                                st.session_state.tray_df,
+                                st.session_state.connections_df,
+                                st.session_state.endpoints_df,
+                                node_id,
+                                new_name.strip()
+                            )
+                            st.session_state.tray_df = ensure_xy_columns(t)
+                            st.session_state.connections_df = c
+                            st.session_state.endpoints_df = e
+                            st.session_state.routes_df = None
+                            if st.session_state.focus_node == node_id:
+                                st.session_state.focus_node = new_name.strip()
+                            st.session_state.sel_nodes = [new_name.strip()]
+                            st.session_state.sel_edges = []
+                            st.success("Node renamed.")
+                            st.rerun()
+                    else:
+                        st.warning("Enter a different non-empty name.")
+
+                st.markdown("**Duplicate**")
+                dup_name = st.text_input("Duplicate as", value=f"{node_id}_COPY", key="sel_dup_node_new")
+                if st.button("Duplicate node", key="sel_dup_node_btn", width="stretch"):
+                    if dup_name.strip():
+                        if (st.session_state.tray_df["RunName"].astype(str).str.strip() == dup_name.strip()).any():
+                            st.error("That duplicate name already exists.")
+                        else:
+                            st.session_state.tray_df = df_duplicate_node(st.session_state.tray_df, node_id, dup_name.strip())
+                            st.session_state.routes_df = None
+                            st.success("Node duplicated.")
+                            st.rerun()
+                    else:
+                        st.warning("Enter a name for the duplicate.")
+
+            elif sel_edges:
+                raw_edge = sel_edges[0]
+                a, b, disp = parse_selected_edge(raw_edge)
+
+                st.markdown("**Selected Connection**")
+                st.write(f"**Connection:** {disp}")
+
+                if not (a and b):
+                    st.caption("Could not parse endpoints for this connection (unexpected format).")
+                    st.code(str(raw_edge))
                 else:
-                    st.warning(
-                        "No positions were returned yet.\n\n"
-                        "✅ Drag a node, then click an empty area of the graph once, then click **Save** again."
-                    )
+                    st.write(f"**From:** {a}")
+                    st.write(f"**To:** {b}")
 
-        if st.button("Clear saved positions (blank X/Y)", key="clear_positions_btn", width="stretch"):
-            st.session_state.tray_df["X"] = pd.NA
-            st.session_state.tray_df["Y"] = pd.NA
-            st.session_state.routes_df = None
-            st.success("Cleared Tray.X and Tray.Y.")
-            st.rerun()
+                    st.divider()
 
-        st.divider()
+                    if st.button("Delete connection", key="sel_delete_edge", width="stretch"):
+                        before = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                        st.session_state.connections_df = df_delete_edge(st.session_state.connections_df, a, b)
+                        after = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                        st.session_state.routes_df = None
 
-        st.markdown("**Add / Update Node**")
-        new_name = st.text_input("RunName", key="add_node_name")
-        new_noise = st.text_input("Noise Level (e.g. 1 or 1,2)", key="add_node_noise")
-        if st.button("Save Node", key="save_node_btn", width="stretch"):
-            if new_name.strip():
-                df = ensure_xy_columns(st.session_state.tray_df.copy())
-                rn = new_name.strip()
-                mask = df["RunName"].astype(str).str.strip() == rn
-                if mask.any():
-                    df.loc[mask, "Noise Level"] = new_noise
+                        st.session_state.sel_nodes = []
+                        st.session_state.sel_edges = []
+
+                        if before == after:
+                            st.info("No matching connection was found to delete (already removed?).")
+                        else:
+                            st.success("Connection deleted.")
+                        st.rerun()
+
+                    st.caption("This deletes the row from the Connections sheet (undirected match).")
+
+            else:
+                st.info("Select a node or connection in the graph to edit it here.")
+
+            st.divider()
+
+            # ====================================================
+            # Search / Focus
+            # ====================================================
+            st.markdown("### Search / Focus")
+
+            st.session_state.focus_depth = st.slider(
+                "Neighborhood depth",
+                min_value=1,
+                max_value=6,
+                value=int(st.session_state.focus_depth),
+                step=1,
+                help="When you focus a node, the graph shows this node + neighbors up to N hops.",
+            )
+
+            focus_pick = st.selectbox(
+                "Find a node (type to search)",
+                options=[""] + node_names,
+                index=0 if not st.session_state.focus_node else (
+                    node_names.index(st.session_state.focus_node) + 1
+                    if st.session_state.focus_node in node_names else 0
+                ),
+                key="focus_pick_select",
+                help="Choosing a node will focus/highlight it by showing only its local neighborhood.",
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Focus", width="stretch", key="focus_btn"):
+                    if focus_pick and focus_pick.strip():
+                        st.session_state.focus_node = focus_pick.strip()
+                        st.session_state.sel_nodes = [st.session_state.focus_node]
+                        st.session_state.sel_edges = []
+                        st.rerun()
+                    else:
+                        st.warning("Pick a node to focus.")
+            with c2:
+                if st.button("Clear", width="stretch", key="clear_focus_btn"):
+                    st.session_state.focus_node = None
+                    st.rerun()
+
+            if st.session_state.focus_node:
+                st.caption(f"Focused on: **{st.session_state.focus_node}** (showing local neighborhood)")
+
+            st.divider()
+
+            # ====================================================
+            # Connection (manual) Add/Delete
+            # ====================================================
+            st.markdown("### Connection")
+
+            conn_from = st.selectbox(
+                "From (type to search)",
+                options=[""] + node_names,
+                index=0,
+                key="conn_from",
+            )
+            conn_to = st.selectbox(
+                "To (type to search)",
+                options=[""] + node_names,
+                index=0,
+                key="conn_to",
+            )
+
+            b_add, b_del = st.columns(2)
+
+            with b_add:
+                if st.button("Add", width="stretch", key="add_edge_btn"):
+                    a = (conn_from or "").strip()
+                    b = (conn_to or "").strip()
+                    if not a or not b:
+                        st.warning("Choose both From and To.")
+                    elif a == b:
+                        st.warning("From and To must be different.")
+                    else:
+                        con = st.session_state.connections_df.copy()
+
+                        def is_dup(r):
+                            x = str(r.get("From", "")).strip()
+                            y = str(r.get("To", "")).strip()
+                            return set([x, y]) == set([a, b])
+
+                        dup = False
+                        if ("From" in con.columns) and ("To" in con.columns) and not con.empty:
+                            try:
+                                dup = bool(con.apply(is_dup, axis=1).any())
+                            except Exception:
+                                dup = False
+
+                        if dup:
+                            st.info("That connection already exists.")
+                        else:
+                            new_row = {col: "" for col in con.columns}
+                            if "From" in con.columns:
+                                new_row["From"] = a
+                            if "To" in con.columns:
+                                new_row["To"] = b
+                            con = pd.concat([con, pd.DataFrame([new_row])], ignore_index=True)
+
+                            st.session_state.connections_df = con
+                            st.session_state.routes_df = None
+                            st.success(f"Added connection: {a} ↔ {b}")
+                            st.rerun()
+
+            with b_del:
+                if st.button("Delete", width="stretch", key="delete_edge_btn"):
+                    a = (conn_from or "").strip()
+                    b = (conn_to or "").strip()
+                    if not a or not b:
+                        st.warning("Choose both From and To.")
+                    elif a == b:
+                        st.warning("From and To must be different.")
+                    else:
+                        before = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                        st.session_state.connections_df = df_delete_edge(st.session_state.connections_df, a, b)
+                        after = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                        st.session_state.routes_df = None
+
+                        if before == after:
+                            st.info("No matching connection was found to delete.")
+                        else:
+                            st.session_state.sel_edges = []
+                            st.session_state.sel_nodes = []
+                            st.success(f"Deleted connection: {a} ↔ {b}")
+                        st.rerun()
+
+            st.divider()
+
+            # ====================================================
+            # Delete node (autocomplete)
+            # ====================================================
+            st.markdown("### Delete node (autocomplete)")
+
+            del_pick = st.selectbox(
+                "Node to delete (type to search)",
+                options=[""] + node_names,
+                index=0,
+                key="delete_node_pick",
+            )
+            if st.button("Delete selected node", width="stretch", key="delete_node_autofill_btn"):
+                if not del_pick.strip():
+                    st.warning("Choose a node to delete.")
                 else:
-                    df = pd.concat(
-                        [df, pd.DataFrame([{"RunName": rn, "Noise Level": new_noise, "X": pd.NA, "Y": pd.NA}])],
-                        ignore_index=True
+                    node_id = del_pick.strip()
+                    t, c, e = df_delete_node(
+                        st.session_state.tray_df,
+                        st.session_state.connections_df,
+                        st.session_state.endpoints_df,
+                        node_id
                     )
-                st.session_state.tray_df = df
+                    st.session_state.tray_df = ensure_xy_columns(t)
+                    st.session_state.connections_df = c
+                    st.session_state.endpoints_df = e
+                    st.session_state.routes_df = None
+
+                    if st.session_state.focus_node == node_id:
+                        st.session_state.focus_node = None
+                    if st.session_state.sel_nodes and st.session_state.sel_nodes[0] == node_id:
+                        st.session_state.sel_nodes = []
+                        st.session_state.sel_edges = []
+                    st.success(f"Deleted node: {node_id}")
+                    st.rerun()
+
+            st.divider()
+
+            # ====================================================
+            # Layout
+            # ====================================================
+            st.markdown("### Layout")
+
+            if st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch"):
+                positions = None
+                selected_nodes = st.session_state.sel_nodes or []
+                selected_edges = st.session_state.sel_edges or []
+
+                if selection:
+                    try:
+                        _sn, _se, positions = selection
+                    except Exception:
+                        positions = None
+
+                if positions and isinstance(positions, dict) and len(positions) > 0:
+                    st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
+                    st.success(f"Saved positions for {len(positions)} node(s). You can keep dragging and save again anytime.")
+                    st.rerun()
+                else:
+                    if selected_nodes or selected_edges:
+                        st.warning(
+                            "Positions could not be captured because something is selected.\n\n"
+                            "✅ Click an empty area of the graph to deselect (select the graph), then click **Save** again."
+                        )
+                    else:
+                        st.warning(
+                            "No positions were returned yet.\n\n"
+                            "✅ Drag a node, then click an empty area of the graph once, then click **Save** again."
+                        )
+
+            if st.button("Clear saved positions (blank X/Y)", key="clear_positions_btn", width="stretch"):
+                st.session_state.tray_df["X"] = pd.NA
+                st.session_state.tray_df["Y"] = pd.NA
                 st.session_state.routes_df = None
+                st.success("Cleared Tray.X and Tray.Y.")
                 st.rerun()
-            else:
-                st.error("RunName cannot be blank.")
-
-        st.divider()
-
-        st.markdown("**Delete Node**")
-        del_name = st.text_input("Node to delete (RunName)", key="del_node_name")
-        if st.button("Delete Node", key="delete_node_btn", width="stretch"):
-            if del_name.strip():
-                node = del_name.strip()
-
-                df = st.session_state.tray_df
-                st.session_state.tray_df = df[df["RunName"].astype(str).str.strip() != node].reset_index(drop=True)
-
-                con = st.session_state.connections_df
-                if "From" in con.columns and "To" in con.columns:
-                    st.session_state.connections_df = con[
-                        (con["From"].astype(str).str.strip() != node) &
-                        (con["To"].astype(str).str.strip() != node)
-                    ].reset_index(drop=True)
-
-                ep = st.session_state.endpoints_df
-                if "tray/conduit(s)" in ep.columns:
-                    def remove_token(s):
-                        parts = [p.strip() for p in str(s).split(",") if p.strip()]
-                        parts = [p for p in parts if p != node]
-                        return ",".join(parts)
-                    ep = ep.copy()
-                    ep["tray/conduit(s)"] = ep["tray/conduit(s)"].apply(remove_token)
-                    st.session_state.endpoints_df = ep
-
-                st.session_state.routes_df = None
-                st.rerun()
-            else:
-                st.error("Enter a node name to delete.")
-
-        st.divider()
-
-        st.markdown("**Connections**")
-        a = st.text_input("From", key="edge_from")
-        b = st.text_input("To", key="edge_to")
-
-        if st.button("Add Edge", key="add_edge_btn", width="stretch"):
-            aa, bb = a.strip(), b.strip()
-            if aa and bb and aa != bb:
-                con = st.session_state.connections_df.copy()
-                if "From" not in con.columns:
-                    con["From"] = ""
-                if "To" not in con.columns:
-                    con["To"] = ""
-                exists = set(tuple(sorted((str(r["From"]).strip(), str(r["To"]).strip())))
-                             for _, r in con.dropna(subset=["From", "To"]).iterrows())
-                key = tuple(sorted((aa, bb)))
-                if key not in exists:
-                    con = pd.concat([con, pd.DataFrame([{"From": aa, "To": bb}])], ignore_index=True)
-                st.session_state.connections_df = con
-                st.session_state.routes_df = None
-                st.rerun()
-
-        if st.button("Delete Edge", key="delete_edge_btn", width="stretch"):
-            aa, bb = a.strip(), b.strip()
-            con = st.session_state.connections_df.copy()
-
-            def is_match(r):
-                x = str(r.get("From", "")).strip()
-                y = str(r.get("To", "")).strip()
-                return set([x, y]) == set([aa, bb])
-
-            if ("From" in con.columns) and ("To" in con.columns) and aa and bb:
-                mask = con.apply(is_match, axis=1)
-                con = con[~mask].reset_index(drop=True)
-            st.session_state.connections_df = con
-            st.session_state.routes_df = None
-            st.rerun()
-
-        st.info("You can keep dragging nodes after saving. Save again anytime.")
 
 with tab5:
     st.subheader("Route cables")
@@ -681,7 +1158,11 @@ with tab5:
         if st.button("Route Now", key="route_btn"):
             try:
                 net = CableNetwork()
-                net.build_from_dfs(st.session_state.tray_df, st.session_state.connections_df, st.session_state.endpoints_df)
+                net.build_from_dfs(
+                    st.session_state.tray_df,
+                    st.session_state.connections_df,
+                    st.session_state.endpoints_df
+                )
                 routes_df = net.route_cables_df(st.session_state.cables_df)
                 st.session_state.routes_df = routes_df
                 st.success("Routing complete.")
