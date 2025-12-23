@@ -1,1 +1,7 @@
-streamlit
+streamlitstreamlit
+pandas
+openpyxl
+networkx
+pyvis
+matplotlib
+streamlit-agraph
