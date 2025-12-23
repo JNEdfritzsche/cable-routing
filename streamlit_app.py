@@ -280,12 +280,12 @@ def validate_dfs(dfs: dict) -> list[str]:
 
 
 # ============================================================
-# Graph helpers
+# Graph helpers (Version 3 SVG nodes + seam fix)
 # ============================================================
 
 ORANGE = "#FFA500"
-GREEN = "#00A651"
-GRAY = "#CFCFCF"
+GREEN  = "#00A651"
+GRAY   = "#CFCFCF"
 
 EDGE_COLOR = "#000000"
 EDGE_WIDTH = 2
@@ -293,10 +293,12 @@ EDGE_WIDTH = 2
 NODE_BORDER_COLOR = "#333333"
 SVG_BORDER_WIDTH = 2
 
-# Size targets
 TRAY_SIDE = 70
 TRAY_RADIUS = 14
 IMAGE_SIZE = 32
+
+# Hidden probe node (forces component to send a value + positions without user clicking)
+PROBE_ID = "__POS_PROBE__"
 
 def ensure_xy_columns(tray_df: pd.DataFrame) -> pd.DataFrame:
     tray_df = tray_df.copy()
@@ -323,9 +325,6 @@ def infer_type_from_name(name: str) -> str:
 def svg_data_uri(svg: str) -> str:
     return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
 
-# --- SVG helpers ---
-# IMPORTANT: we overlap the two halves by 1px to remove the seam/gap from anti-aliasing.
-
 def solid_rounded_square_svg(side: int, r: int, color: str, border: str = NODE_BORDER_COLOR) -> str:
     return f"""
     <svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side}" viewBox="0 0 {side} {side}">
@@ -337,7 +336,6 @@ def solid_rounded_square_svg(side: int, r: int, color: str, border: str = NODE_B
 
 def split_rounded_square_svg(side: int, r: int, left_color: str, right_color: str, border: str = NODE_BORDER_COLOR) -> str:
     half = side // 2
-    # left overlaps by +1px into the right to remove seam
     left_w = half + 1
     right_x = half
     right_w = side - half
@@ -370,7 +368,6 @@ def solid_circle_svg(d: int, color: str, border: str = NODE_BORDER_COLOR) -> str
 def split_circle_svg(d: int, left_color: str, right_color: str, border: str = NODE_BORDER_COLOR) -> str:
     r = d / 2
     rr = r - 1
-    # seam fix: left rect extends by +1px into the right
     left_w = int(r) + 1
     right_x = int(r)
     right_w = d - int(r)
@@ -434,7 +431,13 @@ def neighborhood_nodes(adj: dict[str, set[str]], start: str, depth: int) -> set[
             break
     return seen
 
-def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, focus_node: str | None = None, focus_depth: int = 2):
+def build_vis_nodes_edges(
+    tray_df: pd.DataFrame,
+    connections_df: pd.DataFrame,
+    focus_node: str | None = None,
+    focus_depth: int = 2,
+    include_probe: bool = False,
+):
     tray_df = ensure_xy_columns(tray_df)
 
     focus_set = None
@@ -458,7 +461,6 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, f
         kind = noise_color_kind(levels)
         ntype = infer_type_from_name(rn)
 
-        # Build SVG image for ALL nodes (single and mixed)
         if ntype == "Tray":
             if kind == "nl1":
                 svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, ORANGE, NODE_BORDER_COLOR)
@@ -469,7 +471,6 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, f
             else:
                 svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, GRAY, NODE_BORDER_COLOR)
         else:
-            # Conduit and other nodes use circles
             d = 80
             if kind == "nl1":
                 svg = solid_circle_svg(d, ORANGE, NODE_BORDER_COLOR)
@@ -487,18 +488,14 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, f
             "shape": "image",
             "image": svg_data_uri(svg),
             "size": IMAGE_SIZE,
-
-            # IMPORTANT: we do NOT rely on vis border now (SVG handles border)
-            "borderWidth": 0,
+            "borderWidth": 0,  # SVG owns border
             "font": {"vadjust": 0},
         }
 
-        # Optional focus highlight using vis border (adds a halo border without changing SVG)
         if is_focus:
             node["borderWidth"] = 3
             node["color"] = {"border": "#000000"}
 
-        # fixed positions
         x = r.get("X", pd.NA)
         y = r.get("Y", pd.NA)
         try:
@@ -544,6 +541,24 @@ def build_vis_nodes_edges(tray_df: pd.DataFrame, connections_df: pd.DataFrame, f
                 "width": EDGE_WIDTH,
             })
 
+    # IMPORTANT: when optimizing, include a hidden selected node to force the component
+    # to emit a value (and positions) without the user clicking anything.
+    if include_probe and PROBE_ID not in node_ids:
+        nodes.append({
+            "id": PROBE_ID,
+            "label": "",
+            "title": "",
+            "shape": "dot",
+            "size": 1,
+            "x": 0,
+            "y": 0,
+            "fixed": True,
+            "physics": False,
+            "color": {"background": "rgba(0,0,0,0)", "border": "rgba(0,0,0,0)"},
+            "font": {"size": 0, "color": "rgba(0,0,0,0)"},
+            "selected": True,
+        })
+
     return nodes, edges
 
 def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFrame:
@@ -555,6 +570,10 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
     rn_series = tray_df["RunName"].astype(str).str.strip()
 
     for nid, xy in positions.items():
+        # ignore probe
+        if str(nid).strip() == PROBE_ID:
+            continue
+
         x = y = None
         if isinstance(xy, dict):
             x = xy.get("x")
@@ -755,7 +774,7 @@ def df_duplicate_node(tray_df, source_name: str, new_name: str):
 
 
 # ============================================================
-# Selection parsing helper (FIX FOR EDGE DELETE)
+# Selection parsing helper (edge delete)
 # ============================================================
 
 def parse_selected_edge(sel_edge) -> tuple[str | None, str | None, str]:
@@ -817,6 +836,12 @@ st.session_state.setdefault("sel_edges", [])
 st.session_state.setdefault("focus_node", None)
 st.session_state.setdefault("focus_depth", 2)
 
+st.session_state.setdefault("graph_key_v", 0)
+
+st.session_state.setdefault("layout_opt_active", False)
+st.session_state.setdefault("layout_opt_last_positions", None)
+st.session_state.setdefault("layout_opt_backup_xy", None)
+
 GRAPH_HEIGHT = 740
 
 st.markdown(
@@ -842,7 +867,11 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.sel_nodes = []
     st.session_state.sel_edges = []
     st.session_state.focus_node = None
+    st.session_state.graph_key_v += 1
     st.session_state.uploader_key_v += 1
+    st.session_state.layout_opt_active = False
+    st.session_state.layout_opt_last_positions = None
+    st.session_state.layout_opt_backup_xy = None
     st.rerun()
 
 if uploaded is not None:
@@ -860,6 +889,10 @@ if uploaded is not None:
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
             st.session_state.focus_node = None
+            st.session_state.graph_key_v += 1
+            st.session_state.layout_opt_active = False
+            st.session_state.layout_opt_last_positions = None
+            st.session_state.layout_opt_backup_xy = None
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
         st.sidebar.error(f"Failed to load workbook: {e}")
@@ -944,6 +977,8 @@ with tabG:
     )
     node_names = sorted(node_names, key=lambda s: s.lower())
 
+    selection = None
+
     with graph_col:
         graph_box = st.container(border=True)
         with graph_box:
@@ -954,42 +989,88 @@ with tabG:
                 st.session_state.connections_df,
                 focus_node=st.session_state.focus_node,
                 focus_depth=int(st.session_state.focus_depth),
+                include_probe=bool(st.session_state.layout_opt_active),  # << key fix
             )
 
-            options = {
-                "physics": {"enabled": False},
-                "interaction": {
-                    "dragNodes": True,
-                    "dragView": True,
-                    "zoomView": True,
-                    "hover": True,
-                    "multiselect": False,
-                    "selectConnectedEdges": True,
-                },
-                "nodes": {"font": {"vadjust": 0}},
-                "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
-            }
+            if st.session_state.layout_opt_active:
+                options = {
+                    "physics": {
+                        "enabled": True,
+                        "stabilization": {
+                            "enabled": True,
+                            "iterations": 1600,
+                            "updateInterval": 50,
+                            "fit": True,
+                        },
+                        "solver": "forceAtlas2Based",
+                        "forceAtlas2Based": {
+                            "gravitationalConstant": -260,
+                            "centralGravity": 0.01,
+                            "springLength": 240,
+                            "springConstant": 0.02,
+                            "damping": 0.4,
+                            "avoidOverlap": 1.0,
+                        },
+                        "minVelocity": 0.20,
+                        "maxVelocity": 70,
+                        "timestep": 0.5,
+                    },
+                    "layout": {"improvedLayout": True},
+                    "interaction": {
+                        "dragNodes": True,
+                        "dragView": True,
+                        "zoomView": True,
+                        "hover": True,
+                        "multiselect": False,
+                        "selectConnectedEdges": True,
+                    },
+                    "nodes": {"font": {"vadjust": 0}},
+                    "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
+                }
+            else:
+                options = {
+                    "physics": {"enabled": False},
+                    "layout": {"improvedLayout": True},
+                    "interaction": {
+                        "dragNodes": True,
+                        "dragView": True,
+                        "zoomView": True,
+                        "hover": True,
+                        "multiselect": False,
+                        "selectConnectedEdges": True,
+                    },
+                    "nodes": {"font": {"vadjust": 0}},
+                    "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
+                }
 
             selection = streamlit_vis_network(
                 nodes,
                 edges,
                 height=GRAPH_HEIGHT,
                 options=options,
-                key="vis_network_graph",
+                key=f"vis_network_graph_{st.session_state.graph_key_v}",
             )
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+        # Capture selection + positions
         if selection:
             try:
                 sel_nodes, sel_edges, _pos = selection
             except Exception:
-                sel_nodes, sel_edges = [], []
-            st.session_state.sel_nodes = sel_nodes or []
+                sel_nodes, sel_edges, _pos = [], [], None
+
+            # Always store positions if present (even if the only "selection" is the probe)
+            st.session_state.layout_opt_last_positions = _pos if isinstance(_pos, dict) else st.session_state.layout_opt_last_positions
+
+            # Strip probe out of selection so the UI doesn't show it
+            cleaned_nodes = [n for n in (sel_nodes or []) if str(n).strip() != PROBE_ID]
+            st.session_state.sel_nodes = cleaned_nodes
             st.session_state.sel_edges = sel_edges or []
         else:
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
+            # Do NOT wipe layout_opt_last_positions here (we want the latest captured value)
 
     with tools_col:
         tools_box = st.container(height=GRAPH_HEIGHT, border=True)
@@ -1026,7 +1107,6 @@ with tabG:
                     options=connect_options,
                     index=0,
                     key="sel_connect_target",
-                    help="Pick another node to connect to the selected node.",
                 )
 
                 c_add, c_del = st.columns(2)
@@ -1041,6 +1121,7 @@ with tabG:
                                 st.session_state.connections_df = new_con
                                 st.session_state.routes_df = None
                                 st.success(f"Added connection: {node_id} ↔ {tgt}")
+                                st.session_state.graph_key_v += 1
                                 st.rerun()
                             else:
                                 st.info("That connection already exists (or could not be added).")
@@ -1058,6 +1139,7 @@ with tabG:
                                 st.info("No matching connection was found to delete.")
                             else:
                                 st.success(f"Deleted connection: {node_id} ↔ {tgt}")
+                                st.session_state.graph_key_v += 1
                             st.rerun()
 
                 st.divider()
@@ -1078,6 +1160,7 @@ with tabG:
                     st.session_state.sel_nodes = []
                     st.session_state.sel_edges = []
                     st.success("Node deleted.")
+                    st.session_state.graph_key_v += 1
                     st.rerun()
 
                 st.markdown("**Rename**")
@@ -1103,6 +1186,7 @@ with tabG:
                             st.session_state.sel_nodes = [new_name.strip()]
                             st.session_state.sel_edges = []
                             st.success("Node renamed.")
+                            st.session_state.graph_key_v += 1
                             st.rerun()
                     else:
                         st.warning("Enter a different non-empty name.")
@@ -1117,6 +1201,7 @@ with tabG:
                             st.session_state.tray_df = df_duplicate_node(st.session_state.tray_df, node_id, dup_name.strip())
                             st.session_state.routes_df = None
                             st.success("Node duplicated.")
+                            st.session_state.graph_key_v += 1
                             st.rerun()
                     else:
                         st.warning("Enter a name for the duplicate.")
@@ -1149,6 +1234,7 @@ with tabG:
                             st.info("No matching connection was found to delete (already removed?).")
                         else:
                             st.success("Connection deleted.")
+                        st.session_state.graph_key_v += 1
                         st.rerun()
 
                     st.caption("This deletes the row from the Connections sheet (undirected match).")
@@ -1166,7 +1252,6 @@ with tabG:
                 max_value=6,
                 value=int(st.session_state.focus_depth),
                 step=1,
-                help="When you focus a node, the graph shows this node + neighbors up to N hops.",
             )
 
             focus_pick = st.selectbox(
@@ -1186,12 +1271,14 @@ with tabG:
                         st.session_state.focus_node = focus_pick.strip()
                         st.session_state.sel_nodes = [st.session_state.focus_node]
                         st.session_state.sel_edges = []
+                        st.session_state.graph_key_v += 1
                         st.rerun()
                     else:
                         st.warning("Pick a node to focus.")
             with c2:
                 if st.button("Clear", width="stretch", key="clear_focus_btn"):
                     st.session_state.focus_node = None
+                    st.session_state.graph_key_v += 1
                     st.rerun()
 
             if st.session_state.focus_node:
@@ -1219,6 +1306,7 @@ with tabG:
                             st.session_state.connections_df = new_con
                             st.session_state.routes_df = None
                             st.success(f"Added connection: {a} ↔ {b}")
+                            st.session_state.graph_key_v += 1
                             st.rerun()
                         else:
                             st.info("That connection already exists (or could not be added).")
@@ -1241,6 +1329,7 @@ with tabG:
                             st.session_state.sel_edges = []
                             st.session_state.sel_nodes = []
                             st.success(f"Deleted connection: {a} ↔ {b}")
+                            st.session_state.graph_key_v += 1
                         st.rerun()
 
             st.divider()
@@ -1284,6 +1373,7 @@ with tabG:
                         st.session_state.sel_nodes = [name]
                         st.session_state.sel_edges = []
                         st.success(f"Added node: {name}")
+                        st.session_state.graph_key_v += 1
                         st.rerun()
 
             st.divider()
@@ -1312,17 +1402,96 @@ with tabG:
                         st.session_state.sel_nodes = []
                         st.session_state.sel_edges = []
                     st.success(f"Deleted node: {node_id}")
+                    st.session_state.graph_key_v += 1
                     st.rerun()
 
             st.divider()
 
             st.markdown("### Layout")
 
+            if st.button("Home / Recenter graph view", key="home_recenter_btn", width="stretch"):
+                st.session_state.focus_node = None
+                st.session_state.sel_nodes = []
+                st.session_state.sel_edges = []
+                st.session_state.graph_key_v += 1
+                st.success("Recentered graph view.")
+                st.rerun()
+
+            if not st.session_state.layout_opt_active:
+                if st.button("Optimize layout (turns on physics)", key="opt_turn_on_physics_btn", width="stretch"):
+                    tdf = ensure_xy_columns(st.session_state.tray_df).copy()
+                    backup = {
+                        "RunName": tdf["RunName"].astype(str).tolist(),
+                        "X": tdf["X"].tolist(),
+                        "Y": tdf["Y"].tolist(),
+                    }
+                    st.session_state.layout_opt_backup_xy = backup
+
+                    # blank out positions so physics can compute from scratch
+                    st.session_state.tray_df["X"] = pd.NA
+                    st.session_state.tray_df["Y"] = pd.NA
+
+                    st.session_state.routes_df = None
+                    st.session_state.focus_node = None
+                    st.session_state.sel_nodes = []
+                    st.session_state.sel_edges = []
+
+                    st.session_state.layout_opt_active = True
+                    st.session_state.layout_opt_last_positions = None  # will be filled by probe selection
+                    st.session_state.graph_key_v += 1
+                    st.success("Physics enabled for optimization. Let it settle, then save or cancel.")
+                    st.rerun()
+            else:
+                st.info(
+                    "Optimization is active (physics ON).\n\n"
+                    "✅ Let the graph settle, then click **Save optimized positions (turns off physics)**.\n"
+                    "↩️ Or click **Cancel optimization (turns off physics)** to revert to the previous layout."
+                )
+
+                if st.button("Save optimized positions (turns off physics)", key="save_opt_positions_btn", width="stretch"):
+                    positions = st.session_state.layout_opt_last_positions
+
+                    if positions and isinstance(positions, dict) and len(positions) > 0:
+                        st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
+                        st.session_state.layout_opt_active = False
+                        st.session_state.layout_opt_last_positions = None
+                        st.session_state.layout_opt_backup_xy = None
+                        st.session_state.graph_key_v += 1
+                        st.success(f"Saved optimized positions for {len(positions)} node(s). Physics is now OFF.")
+                        st.rerun()
+                    else:
+                        # With the probe node, this should basically never happen now.
+                        st.warning(
+                            "No positions were returned yet.\n\n"
+                            "✅ Wait a moment for stabilization, then click **Save optimized positions** again."
+                        )
+
+                if st.button("Cancel optimization (turns off physics)", key="cancel_opt_btn", width="stretch"):
+                    backup = st.session_state.layout_opt_backup_xy
+                    if backup and "RunName" in backup:
+                        tdf = ensure_xy_columns(st.session_state.tray_df).copy()
+                        rn = tdf["RunName"].astype(str).tolist()
+                        bmap = {str(n).strip(): (backup["X"][i], backup["Y"][i]) for i, n in enumerate(backup["RunName"])}
+
+                        xs = []
+                        ys = []
+                        for n in rn:
+                            x, y = bmap.get(str(n).strip(), (pd.NA, pd.NA))
+                            xs.append(x)
+                            ys.append(y)
+                        tdf["X"] = xs
+                        tdf["Y"] = ys
+                        st.session_state.tray_df = tdf
+
+                    st.session_state.layout_opt_active = False
+                    st.session_state.layout_opt_last_positions = None
+                    st.session_state.layout_opt_backup_xy = None
+                    st.session_state.graph_key_v += 1
+                    st.success("Optimization canceled. Previous layout restored. Physics is now OFF.")
+                    st.rerun()
+
             if st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch"):
                 positions = None
-                selected_nodes = st.session_state.sel_nodes or []
-                selected_edges = st.session_state.sel_edges or []
-
                 if selection:
                     try:
                         _sn, _se, positions = selection
@@ -1334,21 +1503,19 @@ with tabG:
                     st.success(f"Saved positions for {len(positions)} node(s). You can keep dragging and save again anytime.")
                     st.rerun()
                 else:
-                    if selected_nodes or selected_edges:
-                        st.warning(
-                            "Positions could not be captured because something is selected.\n\n"
-                            "✅ Click an empty area of the graph to deselect (select the graph), then click **Save** again."
-                        )
-                    else:
-                        st.warning(
-                            "No positions were returned yet.\n\n"
-                            "✅ Drag a node, then click an empty area of the graph once, then click **Save** again."
-                        )
+                    st.warning(
+                        "No positions were returned yet.\n\n"
+                        "✅ Drag a node, then click an empty area of the graph once, then click **Save** again."
+                    )
 
             if st.button("Clear saved positions (blank X/Y)", key="clear_positions_btn", width="stretch"):
                 st.session_state.tray_df["X"] = pd.NA
                 st.session_state.tray_df["Y"] = pd.NA
                 st.session_state.routes_df = None
+                st.session_state.layout_opt_active = False
+                st.session_state.layout_opt_last_positions = None
+                st.session_state.layout_opt_backup_xy = None
+                st.session_state.graph_key_v += 1
                 st.success("Cleared Tray.X and Tray.Y.")
                 st.rerun()
 
