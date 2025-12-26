@@ -278,13 +278,171 @@ def validate_dfs(dfs: dict) -> list[str]:
             errors.append(f"{sh}: missing columns {sorted(missing)}")
     return errors
 
+def build_demo_workbook_bytes() -> bytes:
+    tray = pd.DataFrame([
+        {"RunName": "LT-01", "Noise Level": "1",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "LT-02", "Noise Level": "1",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "LT-03", "Noise Level": "1",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "CND-01","Noise Level": "1",   "X": pd.NA, "Y": pd.NA},
+
+        {"RunName": "LT-11", "Noise Level": "2",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "LT-12", "Noise Level": "2",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "LT-13", "Noise Level": "2",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "CND-02","Noise Level": "2",   "X": pd.NA, "Y": pd.NA},
+
+        {"RunName": "LT-20", "Noise Level": "1,2", "X": pd.NA, "Y": pd.NA},
+        {"RunName": "CND-20","Noise Level": "1,2", "X": pd.NA, "Y": pd.NA},
+
+        {"RunName": "LT-04", "Noise Level": "1",   "X": pd.NA, "Y": pd.NA},
+        {"RunName": "LT-14", "Noise Level": "2",   "X": pd.NA, "Y": pd.NA},
+    ])
+
+    connections = pd.DataFrame([
+        {"From": "LT-01", "To": "LT-02"},
+        {"From": "LT-02", "To": "LT-03"},
+        {"From": "LT-02", "To": "LT-04"},
+        {"From": "LT-03", "To": "CND-01"},
+
+        {"From": "LT-11", "To": "LT-12"},
+        {"From": "LT-12", "To": "LT-13"},
+        {"From": "LT-12", "To": "LT-14"},
+        {"From": "LT-13", "To": "CND-02"},
+
+        {"From": "CND-01", "To": "LT-20"},
+        {"From": "CND-02", "To": "LT-20"},
+        {"From": "LT-20",  "To": "CND-20"},
+
+        {"From": "LT-04",  "To": "LT-20"},
+        {"From": "LT-14",  "To": "LT-20"},
+    ])
+
+    endpoints = pd.DataFrame([
+        {"device/panel": "PANEL-A", "tray/conduit(s)": "LT-01,LT-11", "Exposed": ""},
+        {"device/panel": "PANEL-B", "tray/conduit(s)": "LT-03,LT-13", "Exposed": "yes"},
+        {"device/panel": "PANEL-C", "tray/conduit(s)": "LT-04",       "Exposed": ""},
+        {"device/panel": "PANEL-D", "tray/conduit(s)": "LT-14",       "Exposed": ""},
+    ])
+
+    cables = pd.DataFrame([
+        {"Sort": 1, "Cable number": "+CBL-0001", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 1},
+        {"Sort": 2, "Cable number": "+CBL-0002", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 2},
+        {"Sort": 3, "Cable number": "+CBL-0003", "equipfrom": "PANEL-C", "equipto": "PANEL-B", "Noise Level": 1},
+        {"Sort": 4, "Cable number": "+CBL-0004", "equipfrom": "PANEL-D", "equipto": "PANEL-B", "Noise Level": 2},
+    ])
+
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        tray.to_excel(writer, sheet_name="Tray", index=False)
+        connections.to_excel(writer, sheet_name="Connections", index=False)
+        endpoints.to_excel(writer, sheet_name="Endpoints", index=False)
+        cables.to_excel(writer, sheet_name="Cables(input)", index=False)
+    out.seek(0)
+    return out.getvalue()
+
 
 # ============================================================
-# Graph helpers (Version 3 SVG nodes + seam fix)
+# Endpoint lookup helpers
+# ============================================================
+
+def _normalize_token_list(s: str) -> list[str]:
+    parts = [p.strip() for p in str(s or "").split(",")]
+    return [p for p in parts if p]
+
+def build_endpoint_to_trays_map(endpoints_df: pd.DataFrame) -> dict[str, list[str]]:
+    m: dict[str, list[str]] = {}
+    if endpoints_df is None or endpoints_df.empty:
+        return m
+    if "device/panel" not in endpoints_df.columns or "tray/conduit(s)" not in endpoints_df.columns:
+        return m
+
+    for _, r in endpoints_df.iterrows():
+        ep = str(r.get("device/panel", "")).strip().lstrip("+")
+        tc = r.get("tray/conduit(s)", "")
+        if not ep:
+            continue
+        trays = _normalize_token_list(tc)
+        if ep in m:
+            m[ep].extend(trays)
+        else:
+            m[ep] = trays
+
+    for k, v in list(m.items()):
+        seen = set()
+        out = []
+        for x in v:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        m[k] = out
+    return m
+
+def build_tray_to_endpoints_map(endpoints_df: pd.DataFrame) -> dict[str, list[str]]:
+    m: dict[str, list[str]] = {}
+    if endpoints_df is None or endpoints_df.empty:
+        return m
+    if "device/panel" not in endpoints_df.columns or "tray/conduit(s)" not in endpoints_df.columns:
+        return m
+
+    for _, r in endpoints_df.iterrows():
+        ep = str(r.get("device/panel", "")).strip().lstrip("+")
+        tc = r.get("tray/conduit(s)", "")
+        if not ep:
+            continue
+        trays = _normalize_token_list(tc)
+        for t in trays:
+            m.setdefault(t, []).append(ep)
+
+    for k, v in list(m.items()):
+        seen = set()
+        out = []
+        for x in v:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        m[k] = out
+    return m
+
+
+# ============================================================
+# Route lookup helpers
+# ============================================================
+
+def compute_routes_df(tray_df: pd.DataFrame, connections_df: pd.DataFrame, endpoints_df: pd.DataFrame, cables_df: pd.DataFrame) -> pd.DataFrame:
+    net = CableNetwork()
+    net.build_from_dfs(tray_df, connections_df, endpoints_df)
+    return net.route_cables_df(cables_df)
+
+def _strip_route_suffix(node: str) -> str:
+    s = str(node or "").strip()
+    for suf in ["(T6)", "(T4)", "(T3)"]:
+        if s.endswith(suf):
+            s = s[: -len(suf)].strip()
+    return s
+
+def nodes_from_via_string(via: str) -> list[str]:
+    if via is None or str(via).strip() == "":
+        return []
+    s = str(via).strip()
+    if s.lower().startswith("error:"):
+        return []
+    if s.strip().lower() == "no valid route":
+        return []
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    cleaned = []
+    for p in parts:
+        if p.upper() == "EXPOSED CONDUIT ROUTE":
+            continue
+        cleaned.append(_strip_route_suffix(p))
+    return cleaned
+
+
+# ============================================================
+# Graph helpers (SVG nodes + seam fix + highlighting)
 # ============================================================
 
 ORANGE = "#FFA500"
 GREEN  = "#00A651"
+YELLOW = "#FFD200"
 GRAY   = "#CFCFCF"
 
 EDGE_COLOR = "#000000"
@@ -297,8 +455,12 @@ TRAY_SIDE = 70
 TRAY_RADIUS = 14
 IMAGE_SIZE = 32
 
-# Hidden probe node (forces component to send a value + positions without user clicking)
 PROBE_ID = "__POS_PROBE__"
+
+# Very obvious highlight styling
+HIGHLIGHT_BORDER_WIDTH = 10
+HIGHLIGHT_BORDER_COLOR = "#FF00FF"
+HIGHLIGHT_GLOW_SIZE = 22
 
 def ensure_xy_columns(tray_df: pd.DataFrame) -> pd.DataFrame:
     tray_df = tray_df.copy()
@@ -391,6 +553,8 @@ def noise_color_kind(levels: set[int]) -> str:
         return "nl1"
     if levels == {2}:
         return "nl2"
+    if levels == {3} or levels == {4}:
+        return "nl34"
     if (1 in levels) and (2 in levels):
         return "mixed12"
     return "other"
@@ -437,8 +601,10 @@ def build_vis_nodes_edges(
     focus_node: str | None = None,
     focus_depth: int = 2,
     include_probe: bool = False,
+    highlight_nodes: set[str] | None = None,
 ):
     tray_df = ensure_xy_columns(tray_df)
+    highlight_nodes = set(highlight_nodes or [])
 
     focus_set = None
     if focus_node:
@@ -456,6 +622,7 @@ def build_vis_nodes_edges(
             continue
 
         is_focus = (focus_node is not None and rn == str(focus_node).strip())
+        is_highlight = rn in highlight_nodes
 
         levels = CableNetwork._parse_noise_levels(r.get("Noise Level", None), run_name=rn)
         kind = noise_color_kind(levels)
@@ -466,6 +633,8 @@ def build_vis_nodes_edges(
                 svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, ORANGE, NODE_BORDER_COLOR)
             elif kind == "nl2":
                 svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, GREEN, NODE_BORDER_COLOR)
+            elif kind == "nl34":
+                svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, YELLOW, NODE_BORDER_COLOR)
             elif kind == "mixed12":
                 svg = split_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, ORANGE, GREEN, NODE_BORDER_COLOR)
             else:
@@ -476,6 +645,8 @@ def build_vis_nodes_edges(
                 svg = solid_circle_svg(d, ORANGE, NODE_BORDER_COLOR)
             elif kind == "nl2":
                 svg = solid_circle_svg(d, GREEN, NODE_BORDER_COLOR)
+            elif kind == "nl34":
+                svg = solid_circle_svg(d, YELLOW, NODE_BORDER_COLOR)
             elif kind == "mixed12":
                 svg = split_circle_svg(d, ORANGE, GREEN, NODE_BORDER_COLOR)
             else:
@@ -488,12 +659,19 @@ def build_vis_nodes_edges(
             "shape": "image",
             "image": svg_data_uri(svg),
             "size": IMAGE_SIZE,
-            "borderWidth": 0,  # SVG owns border
+            "borderWidth": 0,
             "font": {"vadjust": 0},
         }
 
+        if is_highlight:
+            node["borderWidth"] = HIGHLIGHT_BORDER_WIDTH
+            node["color"] = {"border": HIGHLIGHT_BORDER_COLOR}
+            node["shadow"] = {"enabled": True, "size": HIGHLIGHT_GLOW_SIZE, "x": 0, "y": 0}
+            node["size"] = IMAGE_SIZE + 18
+            node["font"] = {"vadjust": 0, "size": 20}
+
         if is_focus:
-            node["borderWidth"] = 3
+            node["borderWidth"] = max(node.get("borderWidth", 0), 3)
             node["color"] = {"border": "#000000"}
 
         x = r.get("X", pd.NA)
@@ -541,8 +719,6 @@ def build_vis_nodes_edges(
                 "width": EDGE_WIDTH,
             })
 
-    # IMPORTANT: when optimizing, include a hidden selected node to force the component
-    # to emit a value (and positions) without the user clicking anything.
     if include_probe and PROBE_ID not in node_ids:
         nodes.append({
             "id": PROBE_ID,
@@ -570,7 +746,6 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
     rn_series = tray_df["RunName"].astype(str).str.strip()
 
     for nid, xy in positions.items():
-        # ignore probe
         if str(nid).strip() == PROBE_ID:
             continue
 
@@ -772,6 +947,21 @@ def df_duplicate_node(tray_df, source_name: str, new_name: str):
     df = pd.concat([df, pd.DataFrame([src_row])], ignore_index=True)
     return df
 
+def df_set_node_noise_level(tray_df: pd.DataFrame, node: str, noise_level_text: str) -> tuple[pd.DataFrame, bool]:
+    node = str(node).strip()
+    df = tray_df.copy()
+    if "RunName" not in df.columns:
+        return tray_df, False
+    if "Noise Level" not in df.columns:
+        df["Noise Level"] = ""
+
+    mask = df["RunName"].astype(str).str.strip() == node
+    if not mask.any():
+        return tray_df, False
+
+    df.loc[mask, "Noise Level"] = str(noise_level_text or "").strip()
+    return df, True
+
 
 # ============================================================
 # Selection parsing helper (edge delete)
@@ -821,7 +1011,29 @@ st.sidebar.header("Workbook")
 
 st.session_state.setdefault("uploader_key_v", 0)
 uploader_key = f"uploader_{st.session_state.uploader_key_v}"
-uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"], key=uploader_key)
+
+source = st.sidebar.radio(
+    "Choose workbook source",
+    options=["Upload Excel (.xlsx)", "Use demo workbook"],
+    index=0,
+    key="workbook_source",
+)
+
+uploaded = None
+demo_clicked = False
+
+if source == "Upload Excel (.xlsx)":
+    uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"], key=uploader_key)
+else:
+    demo_clicked = st.sidebar.button("Load demo workbook", key="load_demo_btn", width="stretch")
+    st.sidebar.caption("Loads a built-in example with multiple routes (Noise Levels 1 and 2 only).")
+    demo_bytes_for_dl = build_demo_workbook_bytes()
+    st.sidebar.download_button(
+        "Download demo workbook (.xlsx)",
+        data=demo_bytes_for_dl,
+        file_name="demo_network_configuration.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 st.session_state.setdefault("tray_df", None)
 st.session_state.setdefault("connections_df", None)
@@ -841,6 +1053,13 @@ st.session_state.setdefault("graph_key_v", 0)
 st.session_state.setdefault("layout_opt_active", False)
 st.session_state.setdefault("layout_opt_last_positions", None)
 st.session_state.setdefault("layout_opt_backup_xy", None)
+
+st.session_state.setdefault("endpoint_highlight_nodes", set())
+st.session_state.setdefault("endpoint_highlight_ep", None)
+
+# NEW: route highlight state
+st.session_state.setdefault("route_highlight_nodes", set())
+st.session_state.setdefault("route_highlight_cable", None)
 
 GRAPH_HEIGHT = 740
 
@@ -872,11 +1091,20 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.layout_opt_active = False
     st.session_state.layout_opt_last_positions = None
     st.session_state.layout_opt_backup_xy = None
+    st.session_state.endpoint_highlight_nodes = set()
+    st.session_state.endpoint_highlight_ep = None
+    st.session_state.route_highlight_nodes = set()
+    st.session_state.route_highlight_cable = None
     st.rerun()
 
+file_bytes = None
 if uploaded is not None:
+    file_bytes = uploaded.getvalue()
+if demo_clicked:
+    file_bytes = build_demo_workbook_bytes()
+
+if file_bytes is not None:
     try:
-        file_bytes = uploaded.getvalue()
         this_hash = hashlib.md5(file_bytes).hexdigest()
         if st.session_state.upload_hash != this_hash:
             loaded = load_excel_to_dfs(file_bytes)
@@ -893,13 +1121,17 @@ if uploaded is not None:
             st.session_state.layout_opt_active = False
             st.session_state.layout_opt_last_positions = None
             st.session_state.layout_opt_backup_xy = None
+            st.session_state.endpoint_highlight_nodes = set()
+            st.session_state.endpoint_highlight_ep = None
+            st.session_state.route_highlight_nodes = set()
+            st.session_state.route_highlight_cable = None
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
         st.sidebar.error(f"Failed to load workbook: {e}")
         st.stop()
 
 if st.session_state.tray_df is None:
-    st.info("Upload an Excel workbook to begin.")
+    st.info("Upload an Excel workbook or load the demo workbook to begin.")
     st.stop()
 
 st.session_state.tray_df = ensure_xy_columns(st.session_state.tray_df)
@@ -977,6 +1209,10 @@ with tabG:
     )
     node_names = sorted(node_names, key=lambda s: s.lower())
 
+    endpoint_to_trays = build_endpoint_to_trays_map(st.session_state.endpoints_df)
+    tray_to_endpoints = build_tray_to_endpoints_map(st.session_state.endpoints_df)
+    endpoint_names = sorted(endpoint_to_trays.keys(), key=lambda s: s.lower())
+
     selection = None
 
     with graph_col:
@@ -984,12 +1220,15 @@ with tabG:
         with graph_box:
             st.markdown('<div class="graphwrap">', unsafe_allow_html=True)
 
+            combined_highlight = set(st.session_state.endpoint_highlight_nodes or set()) | set(st.session_state.route_highlight_nodes or set())
+
             nodes, edges = build_vis_nodes_edges(
                 st.session_state.tray_df,
                 st.session_state.connections_df,
                 focus_node=st.session_state.focus_node,
                 focus_depth=int(st.session_state.focus_depth),
-                include_probe=bool(st.session_state.layout_opt_active),  # << key fix
+                include_probe=bool(st.session_state.layout_opt_active),
+                highlight_nodes=combined_highlight,
             )
 
             if st.session_state.layout_opt_active:
@@ -1053,24 +1292,20 @@ with tabG:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Capture selection + positions
         if selection:
             try:
                 sel_nodes, sel_edges, _pos = selection
             except Exception:
                 sel_nodes, sel_edges, _pos = [], [], None
 
-            # Always store positions if present (even if the only "selection" is the probe)
             st.session_state.layout_opt_last_positions = _pos if isinstance(_pos, dict) else st.session_state.layout_opt_last_positions
 
-            # Strip probe out of selection so the UI doesn't show it
             cleaned_nodes = [n for n in (sel_nodes or []) if str(n).strip() != PROBE_ID]
             st.session_state.sel_nodes = cleaned_nodes
             st.session_state.sel_edges = sel_edges or []
         else:
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
-            # Do NOT wipe layout_opt_last_positions here (we want the latest captured value)
 
     with tools_col:
         tools_box = st.container(height=GRAPH_HEIGHT, border=True)
@@ -1097,6 +1332,13 @@ with tabG:
                 st.write(f"**Noise Level:** {noise_val if str(noise_val).strip() else 'N/A'}")
                 st.write(f"**X:** {'' if pd.isna(x_val) else x_val}")
                 st.write(f"**Y:** {'' if pd.isna(y_val) else y_val}")
+
+                eps = tray_to_endpoints.get(node_id, [])
+                if eps:
+                    st.caption("Endpoints connected to this tray/conduit (from Endpoints sheet):")
+                    st.write(", ".join(eps))
+                else:
+                    st.caption("No endpoints reference this tray/conduit (from Endpoints sheet).")
 
                 st.divider()
 
@@ -1205,6 +1447,53 @@ with tabG:
                             st.rerun()
                     else:
                         st.warning("Enter a name for the duplicate.")
+
+                st.divider()
+                st.markdown("**Edit noise level**")
+
+                preset_map = {
+                    "": "(leave as-is)",
+                    "1": "1",
+                    "2": "2",
+                    "1,2": "1,2",
+                    "2,1": "2,1",
+                }
+                presets = list(preset_map.keys())
+
+                current_text = str(noise_val or "").strip()
+                preset_index = 0
+                if current_text in presets:
+                    preset_index = presets.index(current_text)
+
+                nl_preset_sel = st.selectbox(
+                    "Preset",
+                    options=presets,
+                    index=preset_index,
+                    key="sel_noise_preset",
+                    format_func=lambda x: preset_map.get(x, x),
+                )
+
+                nl_custom_sel = st.text_input(
+                    "Custom (optional: overrides preset if non-empty)",
+                    value="",
+                    key="sel_noise_custom",
+                    placeholder="e.g. 1 or 2 or 1,2",
+                )
+
+                if st.button("Apply noise level", key="apply_noise_btn", width="stretch"):
+                    new_text = (nl_custom_sel or "").strip() if (nl_custom_sel or "").strip() else str(nl_preset_sel or "").strip()
+                    if new_text == "(leave as-is)":
+                        new_text = current_text
+
+                    new_df, ok = df_set_node_noise_level(st.session_state.tray_df, node_id, new_text)
+                    if ok:
+                        st.session_state.tray_df = ensure_xy_columns(new_df)
+                        st.session_state.routes_df = None
+                        st.success(f"Updated noise level for {node_id} to: {new_text if new_text else '(blank)'}")
+                        st.session_state.graph_key_v += 1
+                        st.rerun()
+                    else:
+                        st.error("Could not update noise level for the selected node.")
 
             elif sel_edges:
                 raw_edge = sel_edges[0]
@@ -1407,6 +1696,151 @@ with tabG:
 
             st.divider()
 
+            # ====================================================
+            # Endpoint lookup (second-last, above Route lookup + Layout)
+            # ====================================================
+            st.markdown("### Endpoint lookup")
+
+            ep_pick = st.selectbox(
+                "Choose an endpoint/device (type to search)",
+                options=[""] + endpoint_names,
+                index=0,
+                key="endpoint_lookup_pick",
+            )
+
+            e1, e2 = st.columns([1, 1])
+            with e1:
+                if st.button("Highlight connected trays/conduits", width="stretch", key="endpoint_lookup_highlight_btn"):
+                    if not (ep_pick or "").strip():
+                        st.warning("Pick an endpoint/device.")
+                    else:
+                        ep = (ep_pick or "").strip().lstrip("+")
+                        trays = endpoint_to_trays.get(ep, [])
+                        trays_present = [t for t in trays if t in node_names]
+                        st.session_state.endpoint_highlight_nodes = set(trays_present)
+                        st.session_state.endpoint_highlight_ep = ep
+                        st.session_state.graph_key_v += 1
+                        if trays_present:
+                            st.success(f"Highlighted {len(trays_present)} tray/conduit node(s) for {ep}.")
+                        else:
+                            st.info("No trays/conduits for that endpoint are present in Tray.RunName (nothing to highlight).")
+                        st.rerun()
+
+            with e2:
+                if st.button("Clear endpoint highlight", width="stretch", key="endpoint_lookup_clear_highlight_btn"):
+                    st.session_state.endpoint_highlight_nodes = set()
+                    st.session_state.endpoint_highlight_ep = None
+                    st.session_state.graph_key_v += 1
+                    st.success("Cleared endpoint highlight.")
+                    st.rerun()
+
+            if st.session_state.endpoint_highlight_ep:
+                st.caption(f"Endpoint highlight active for: **{st.session_state.endpoint_highlight_ep}**")
+                if st.session_state.endpoint_highlight_nodes:
+                    st.write(", ".join(sorted(st.session_state.endpoint_highlight_nodes)))
+                else:
+                    st.write("No nodes are currently highlighted for this endpoint.")
+
+            st.divider()
+
+            # ====================================================
+            # NEW: Route lookup (immediately underneath endpoint lookup)
+            # ====================================================
+            st.markdown("### Route lookup")
+
+            routes_df = st.session_state.routes_df
+            if routes_df is None:
+                st.info("Routes are not computed yet. Compute them to enable route lookup/highlighting.")
+                if st.button("Compute routes now", width="stretch", key="compute_routes_in_graph_editor_btn"):
+                    try:
+                        st.session_state.routes_df = compute_routes_df(
+                            st.session_state.tray_df,
+                            st.session_state.connections_df,
+                            st.session_state.endpoints_df,
+                            st.session_state.cables_df,
+                        )
+                        st.success("Routes computed. You can now use Route lookup.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Routing failed: {e}")
+            else:
+                # Build cable list for selectbox
+                try:
+                    ccol = "Cable number" if "Cable number" in routes_df.columns else ("Cable Number" if "Cable Number" in routes_df.columns else None)
+                    if ccol is None:
+                        cable_options = []
+                    else:
+                        cable_options = (
+                            routes_df[ccol]
+                            .astype(str)
+                            .fillna("")
+                            .map(str.strip)
+                            .replace("", pd.NA)
+                            .dropna()
+                            .unique()
+                            .tolist()
+                        )
+                        cable_options = sorted(cable_options, key=lambda s: s.lower())
+                except Exception:
+                    cable_options = []
+
+                cable_pick = st.selectbox(
+                    "Choose a routed cable (type to search)",
+                    options=[""] + cable_options,
+                    index=0,
+                    key="route_lookup_pick",
+                )
+
+                r1, r2 = st.columns([1, 1])
+                with r1:
+                    if st.button("Highlight route path", width="stretch", key="route_lookup_highlight_btn"):
+                        if not (cable_pick or "").strip():
+                            st.warning("Pick a cable.")
+                        else:
+                            cnum = (cable_pick or "").strip()
+                            st.session_state.route_highlight_cable = cnum
+
+                            # find row
+                            df = routes_df.copy()
+                            col = "Cable number" if "Cable number" in df.columns else ("Cable Number" if "Cable Number" in df.columns else None)
+                            if col is None or "Via" not in df.columns:
+                                st.error("Routes table is missing required columns (Cable number/Cable Number, Via).")
+                            else:
+                                mask = df[col].astype(str).map(str.strip) == cnum
+                                if not mask.any():
+                                    st.warning("Could not find that cable in the routed output.")
+                                else:
+                                    via = df.loc[mask, "Via"].iloc[0]
+                                    path_nodes = nodes_from_via_string(via)
+
+                                    # only highlight nodes that exist in the graph
+                                    present = [n for n in path_nodes if n in node_names]
+                                    st.session_state.route_highlight_nodes = set(present)
+
+                                    st.session_state.graph_key_v += 1
+                                    if present:
+                                        st.success(f"Highlighted {len(present)} node(s) along the route for {cnum}.")
+                                    else:
+                                        st.info("Route did not contain any Tray.RunName nodes to highlight (or it was an error/no-route).")
+                                    st.rerun()
+
+                with r2:
+                    if st.button("Clear route highlight", width="stretch", key="route_lookup_clear_btn"):
+                        st.session_state.route_highlight_nodes = set()
+                        st.session_state.route_highlight_cable = None
+                        st.session_state.graph_key_v += 1
+                        st.success("Cleared route highlight.")
+                        st.rerun()
+
+                if st.session_state.route_highlight_cable:
+                    st.caption(f"Route highlight active for: **{st.session_state.route_highlight_cable}**")
+                    if st.session_state.route_highlight_nodes:
+                        st.write(", ".join(sorted(st.session_state.route_highlight_nodes)))
+                    else:
+                        st.write("No nodes are currently highlighted for this route.")
+
+            st.divider()
+
             st.markdown("### Layout")
 
             if st.button("Home / Recenter graph view", key="home_recenter_btn", width="stretch"):
@@ -1427,7 +1861,6 @@ with tabG:
                     }
                     st.session_state.layout_opt_backup_xy = backup
 
-                    # blank out positions so physics can compute from scratch
                     st.session_state.tray_df["X"] = pd.NA
                     st.session_state.tray_df["Y"] = pd.NA
 
@@ -1437,7 +1870,7 @@ with tabG:
                     st.session_state.sel_edges = []
 
                     st.session_state.layout_opt_active = True
-                    st.session_state.layout_opt_last_positions = None  # will be filled by probe selection
+                    st.session_state.layout_opt_last_positions = None
                     st.session_state.graph_key_v += 1
                     st.success("Physics enabled for optimization. Let it settle, then save or cancel.")
                     st.rerun()
@@ -1460,7 +1893,6 @@ with tabG:
                         st.success(f"Saved optimized positions for {len(positions)} node(s). Physics is now OFF.")
                         st.rerun()
                     else:
-                        # With the probe node, this should basically never happen now.
                         st.warning(
                             "No positions were returned yet.\n\n"
                             "✅ Wait a moment for stabilization, then click **Save optimized positions** again."
@@ -1542,14 +1974,12 @@ with tab5:
     with colB:
         if st.button("Route Now", key="route_btn"):
             try:
-                net = CableNetwork()
-                net.build_from_dfs(
+                st.session_state.routes_df = compute_routes_df(
                     st.session_state.tray_df,
                     st.session_state.connections_df,
-                    st.session_state.endpoints_df
+                    st.session_state.endpoints_df,
+                    st.session_state.cables_df,
                 )
-                routes_df = net.route_cables_df(st.session_state.cables_df)
-                st.session_state.routes_df = routes_df
                 st.success("Routing complete.")
             except Exception as e:
                 st.error(f"Routing failed: {e}")
