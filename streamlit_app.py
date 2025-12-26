@@ -436,9 +436,6 @@ def nodes_from_via_string(via: str) -> list[str]:
     return cleaned
 
 def format_route_nodes_for_via(nodes: list[str], noise_level: int | None = None) -> str:
-    """
-    Format a node list as a Via string similar to routing output.
-    """
     if not nodes:
         return ""
     suffix = ""
@@ -479,7 +476,6 @@ IMAGE_SIZE = 32
 
 PROBE_ID = "__POS_PROBE__"
 
-# Very obvious highlight styling
 HIGHLIGHT_BORDER_WIDTH = 10
 HIGHLIGHT_BORDER_COLOR = "#FF00FF"
 HIGHLIGHT_GLOW_SIZE = 22
@@ -491,6 +487,18 @@ def ensure_xy_columns(tray_df: pd.DataFrame) -> pd.DataFrame:
     if "Y" not in tray_df.columns:
         tray_df["Y"] = pd.NA
     return tray_df
+
+def tray_has_any_xy(tray_df: pd.DataFrame) -> bool:
+    """
+    True if there exists at least one row with BOTH X and Y numeric/non-null.
+    """
+    if tray_df is None or tray_df.empty:
+        return False
+    df = ensure_xy_columns(tray_df)
+    xs = pd.to_numeric(df["X"], errors="coerce")
+    ys = pd.to_numeric(df["Y"], errors="coerce")
+    mask = xs.notna() & ys.notna()
+    return bool(mask.any())
 
 def noise_title(run_name: str, noise_val) -> str:
     lv = CableNetwork._parse_noise_levels(noise_val, run_name=run_name)
@@ -793,6 +801,89 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
 
 
 # ============================================================
+# UNSAVED LAYOUT REMINDER helpers
+# ============================================================
+
+def _tray_xy_map(tray_df: pd.DataFrame) -> dict[str, tuple[float | None, float | None]]:
+    """
+    Map RunName -> (x,y) from Tray.X/Y. Non-numeric/blank => None.
+    """
+    df = ensure_xy_columns(tray_df)
+    out: dict[str, tuple[float | None, float | None]] = {}
+    if df is None or df.empty or "RunName" not in df.columns:
+        return out
+
+    for _, r in df.iterrows():
+        rn = r.get("RunName", None)
+        if pd.isna(rn) or str(rn).strip() == "":
+            continue
+        rn = str(rn).strip()
+
+        x = r.get("X", pd.NA)
+        y = r.get("Y", pd.NA)
+        try:
+            x = None if pd.isna(x) else float(x)
+        except Exception:
+            x = None
+        try:
+            y = None if pd.isna(y) else float(y)
+        except Exception:
+            y = None
+        out[rn] = (x, y)
+    return out
+
+def _positions_map(positions: dict) -> dict[str, tuple[float | None, float | None]]:
+    """
+    Map node_id -> (x,y) from vis positions dict. Non-numeric => None. Skips probe.
+    """
+    out: dict[str, tuple[float | None, float | None]] = {}
+    if not isinstance(positions, dict):
+        return out
+    for nid, xy in positions.items():
+        if str(nid).strip() == PROBE_ID:
+            continue
+
+        x = y = None
+        if isinstance(xy, dict):
+            x = xy.get("x")
+            y = xy.get("y")
+        elif isinstance(xy, (list, tuple)) and len(xy) >= 2:
+            x, y = xy[0], xy[1]
+
+        try:
+            x = float(x)
+            y = float(y)
+        except Exception:
+            x = y = None
+
+        out[str(nid).strip()] = (x, y)
+    return out
+
+def _has_unsaved_layout_changes(tray_df: pd.DataFrame, last_positions: dict | None, tol: float = 0.5) -> bool:
+    """
+    True if last_positions differs from Tray X/Y for any node where both sides have numbers.
+    tol: pixel tolerance (vis can shift small floating jitter)
+    """
+    if not isinstance(last_positions, dict) or not last_positions:
+        return False
+
+    tmap = _tray_xy_map(tray_df)
+    pmap = _positions_map(last_positions)
+
+    if not pmap:
+        return False
+
+    for nid, (px, py) in pmap.items():
+        tx, ty = tmap.get(nid, (None, None))
+        if px is None or py is None or tx is None or ty is None:
+            continue
+        if abs(px - tx) > tol or abs(py - ty) > tol:
+            return True
+
+    return False
+
+
+# ============================================================
 # DataFrame mutation helpers
 # ============================================================
 
@@ -1023,22 +1114,15 @@ def parse_selected_edge(sel_edge) -> tuple[str | None, str | None, str]:
 
 
 # ============================================================
-# Generate route helpers (improved warnings + tray vs conduit labels)
+# Generate route helpers (combined search + warnings)
 # ============================================================
 
 def _autoroute_pack(kind: str, value: str) -> str:
-    """
-    Combine kind+value into a single selectbox value.
-    kind: "EP" or "TRAY"
-    """
     k = str(kind or "").strip().upper()
     v = str(value or "").strip()
     return f"{k}::{v}"
 
 def _autoroute_unpack(packed: str) -> tuple[str, str]:
-    """
-    Returns (kind, value) where kind is "EP" or "TRAY".
-    """
     s = str(packed or "").strip()
     if "::" not in s:
         return "", s
@@ -1046,16 +1130,12 @@ def _autoroute_unpack(packed: str) -> tuple[str, str]:
     return k.strip().upper(), v.strip()
 
 def _format_autoroute_option(packed: str) -> str:
-    """
-    Pretty label for the selectbox option.
-    """
     k, v = _autoroute_unpack(packed)
     if not v:
         return ""
     if k == "EP":
         return f"Endpoint: {v}"
     if k == "TRAY":
-        # requested: specify if tray/conduit is specifically a conduit or tray
         t = infer_type_from_name(v)
         if t == "Tray":
             return f"Tray: {v}"
@@ -1070,10 +1150,6 @@ def _resolve_autoroute_side_to_trays(
     value: str,
     noise_level: int,
 ) -> tuple[list[str], str]:
-    """
-    kind: "EP" or "TRAY"
-    Returns (tray_list, error_msg_if_any) with user-friendly diagnostics.
-    """
     k = str(kind or "").strip().upper()
     val = str(value or "").strip().lstrip("+")
     nl = int(noise_level)
@@ -1091,14 +1167,12 @@ def _resolve_autoroute_side_to_trays(
             return [], f"{infer_type_from_name(val)} '{val}' does not support Noise Level {nl} (it has {sorted(levels)})."
         return [val], ""
 
-    # Endpoint
     if val not in net.endpoints:
         return [], f"Endpoint '{val}' is not present in Endpoints.device/panel."
     all_trays = [str(t).strip() for t in (net.endpoints.get(val, []) or []) if str(t).strip()]
     if not all_trays:
         return [], f"Endpoint '{val}' has no tray/conduit(s) listed in Endpoints.tray/conduit(s)."
 
-    # Trays referenced by endpoint but missing from Tray sheet
     missing = [t for t in all_trays if t not in net.noise_levels]
     present = [t for t in all_trays if t in net.noise_levels]
 
@@ -1110,7 +1184,6 @@ def _resolve_autoroute_side_to_trays(
 
     matches = [t for t in present if nl in (net.noise_levels.get(t, set()) or set())]
     if not matches:
-        # explain why: present ones exist but don't match NL (plus mention missing)
         parts = []
         if present:
             parts.append(
@@ -1134,13 +1207,6 @@ def try_auto_route_packed(
     end_packed: str,
     noise_level: int,
 ) -> tuple[list[str] | None, str]:
-    """
-    Auto-route where start/end are chosen from a single combined list.
-    Each packed selection is either:
-      - "EP::<endpoint name>"
-      - "TRAY::<tray/conduit RunName>"
-    Returns (path_nodes, message). If path_nodes is None, message explains why.
-    """
     nl = int(noise_level) if noise_level is not None else None
     if nl is None:
         return None, "Pick a noise level."
@@ -1168,10 +1234,8 @@ def try_auto_route_packed(
     if end_err:
         return None, f"End issue: {end_err}"
 
-    # Found candidates; try BFS
     path = net.find_route(start_trays, set(end_trays), nl)
     if not path:
-        # Provide actionable diagnostics
         start_desc = f"{len(start_trays)} start candidate(s): {', '.join(sorted(set(start_trays)))}"
         end_desc = f"{len(end_trays)} end candidate(s): {', '.join(sorted(set(end_trays)))}"
         return None, (
@@ -1187,9 +1251,6 @@ def try_auto_route_packed(
     return path, "OK"
 
 def validate_manual_route_steps(connections_df: pd.DataFrame, nodes: list[str]) -> tuple[bool, list[tuple[str, str]]]:
-    """
-    Check that each consecutive pair has an undirected edge. Returns (ok, bad_pairs).
-    """
     if not nodes or len(nodes) < 2:
         return True, []
     adj = build_adjacency(connections_df)
@@ -1260,14 +1321,12 @@ st.session_state.setdefault("endpoint_highlight_ep", None)
 st.session_state.setdefault("route_highlight_nodes", set())
 st.session_state.setdefault("route_highlight_cable", None)
 
+# NEW: one-time initial lock-in of layout (only when X/Y are blank on initial load)
+st.session_state.setdefault("initial_layout_autosave_active", False)
+
 # Generate route state
 st.session_state.setdefault("gen_route_mode", "Auto-route (endpoints)")
 st.session_state.setdefault("gen_route_noise_level", 1)
-
-# Combined search bars for auto-route
-st.session_state.setdefault("gen_route_auto_start_pick", "")
-st.session_state.setdefault("gen_route_auto_end_pick", "")
-
 st.session_state.setdefault("gen_route_auto_nodes", set())
 st.session_state.setdefault("gen_route_auto_via", "")
 st.session_state.setdefault("gen_route_auto_msg", "")
@@ -1275,6 +1334,9 @@ st.session_state.setdefault("gen_route_auto_msg", "")
 st.session_state.setdefault("gen_route_manual_nodes", [])
 st.session_state.setdefault("gen_route_manual_via", "")
 st.session_state.setdefault("gen_route_manual_last_clicked", None)
+
+# UNSAVED LAYOUT REMINDER: store last-known reminder state (optional, but helps avoid flicker)
+st.session_state.setdefault("layout_unsaved_hint", False)
 
 GRAPH_HEIGHT = 740
 
@@ -1311,16 +1373,18 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.route_highlight_nodes = set()
     st.session_state.route_highlight_cable = None
 
+    st.session_state.initial_layout_autosave_active = False
+
     st.session_state.gen_route_mode = "Auto-route (endpoints)"
     st.session_state.gen_route_noise_level = 1
-    st.session_state.gen_route_auto_start_pick = ""
-    st.session_state.gen_route_auto_end_pick = ""
     st.session_state.gen_route_auto_nodes = set()
     st.session_state.gen_route_auto_via = ""
     st.session_state.gen_route_auto_msg = ""
     st.session_state.gen_route_manual_nodes = []
     st.session_state.gen_route_manual_via = ""
     st.session_state.gen_route_manual_last_clicked = None
+
+    st.session_state.layout_unsaved_hint = False
 
     st.rerun()
 
@@ -1335,7 +1399,9 @@ if file_bytes is not None:
         this_hash = hashlib.md5(file_bytes).hexdigest()
         if st.session_state.upload_hash != this_hash:
             loaded = load_excel_to_dfs(file_bytes)
-            st.session_state.tray_df = ensure_xy_columns(loaded["Tray"])
+
+            tdf_loaded = ensure_xy_columns(loaded["Tray"])
+            st.session_state.tray_df = tdf_loaded
             st.session_state.connections_df = loaded["Connections"]
             st.session_state.endpoints_df = loaded["Endpoints"]
             st.session_state.cables_df = loaded["Cables(input)"]
@@ -1353,16 +1419,18 @@ if file_bytes is not None:
             st.session_state.route_highlight_nodes = set()
             st.session_state.route_highlight_cable = None
 
+            st.session_state.initial_layout_autosave_active = (not tray_has_any_xy(tdf_loaded))
+
             st.session_state.gen_route_mode = "Auto-route (endpoints)"
             st.session_state.gen_route_noise_level = 1
-            st.session_state.gen_route_auto_start_pick = ""
-            st.session_state.gen_route_auto_end_pick = ""
             st.session_state.gen_route_auto_nodes = set()
             st.session_state.gen_route_auto_via = ""
             st.session_state.gen_route_auto_msg = ""
             st.session_state.gen_route_manual_nodes = []
             st.session_state.gen_route_manual_via = ""
             st.session_state.gen_route_manual_last_clicked = None
+
+            st.session_state.layout_unsaved_hint = False
 
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
@@ -1432,7 +1500,10 @@ with tab4:
 
 with tabG:
     st.subheader("Graph Editor")
-    st.caption("Select a node/edge to edit it on the right. Use Search to focus/highlight a node.")
+    st.caption(
+        "If the workbook loads with blank X/Y, the app will automatically lock in the FIRST layout once. "
+        "After that, positions only change when you click **Save current node positions to Tray (X/Y)**."
+    )
 
     graph_col, tools_col = st.columns([3, 1], gap="large")
 
@@ -1452,7 +1523,6 @@ with tabG:
     tray_to_endpoints = build_tray_to_endpoints_map(st.session_state.endpoints_df)
     endpoint_names = sorted(endpoint_to_trays.keys(), key=lambda s: s.lower())
 
-    # Combined options for auto-route (two search bars only)
     combined_options = [""] + (
         [_autoroute_pack("EP", ep) for ep in endpoint_names] +
         [_autoroute_pack("TRAY", n) for n in node_names]
@@ -1472,12 +1542,14 @@ with tabG:
                 | set(st.session_state.gen_route_manual_nodes or [])
             )
 
+            include_probe = bool(st.session_state.layout_opt_active or st.session_state.initial_layout_autosave_active)
+
             nodes, edges = build_vis_nodes_edges(
                 st.session_state.tray_df,
                 st.session_state.connections_df,
                 focus_node=st.session_state.focus_node,
                 focus_depth=int(st.session_state.focus_depth),
-                include_probe=bool(st.session_state.layout_opt_active),
+                include_probe=include_probe,
                 highlight_nodes=combined_highlight,
             )
 
@@ -1542,15 +1614,16 @@ with tabG:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Capture selection + positions
         clicked_node = None
+        positions = None
+
         if selection:
             try:
-                sel_nodes, sel_edges, _pos = selection
+                sel_nodes, sel_edges, positions = selection
             except Exception:
-                sel_nodes, sel_edges, _pos = [], [], None
+                sel_nodes, sel_edges, positions = [], [], None
 
-            st.session_state.layout_opt_last_positions = _pos if isinstance(_pos, dict) else st.session_state.layout_opt_last_positions
+            st.session_state.layout_opt_last_positions = positions if isinstance(positions, dict) else st.session_state.layout_opt_last_positions
 
             cleaned_nodes = [n for n in (sel_nodes or []) if str(n).strip() != PROBE_ID]
             st.session_state.sel_nodes = cleaned_nodes
@@ -1561,6 +1634,29 @@ with tabG:
         else:
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
+
+        # UNSAVED LAYOUT REMINDER: update flag whenever we have a positions snapshot
+        if (not st.session_state.layout_opt_active) and isinstance(st.session_state.layout_opt_last_positions, dict):
+            st.session_state.layout_unsaved_hint = _has_unsaved_layout_changes(
+                st.session_state.tray_df,
+                st.session_state.layout_opt_last_positions,
+                tol=0.5,
+            )
+        else:
+            st.session_state.layout_unsaved_hint = False
+
+        # One-time initial autosave
+        if (
+            st.session_state.initial_layout_autosave_active
+            and (not st.session_state.layout_opt_active)
+            and isinstance(positions, dict)
+            and len(positions) > 0
+        ):
+            st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
+            st.session_state.initial_layout_autosave_active = False
+            st.session_state.graph_key_v += 1
+            st.success("Initial layout locked in and saved to Tray (X/Y).")
+            st.rerun()
 
         # Manual route building based on clicks
         if (
@@ -1585,6 +1681,14 @@ with tabG:
     with tools_col:
         tools_box = st.container(height=GRAPH_HEIGHT, border=True)
         with tools_box:
+
+            # UNSAVED LAYOUT REMINDER: show banner at top of tools panel
+            if st.session_state.layout_unsaved_hint and (not st.session_state.layout_opt_active):
+                st.warning(
+                    "You have **unsaved node position changes**.\n\n"
+                    "Click **Save current node positions to Tray (X/Y)** to store the new layout in the workbook."
+                )
+
             st.markdown("### Selection")
 
             sel_nodes = st.session_state.sel_nodes or []
@@ -1975,9 +2079,6 @@ with tabG:
 
             st.divider()
 
-            # ====================================================
-            # Endpoint lookup (second-last, above Route lookup + Layout)
-            # ====================================================
             st.markdown("### Endpoint lookup")
 
             ep_pick = st.selectbox(
@@ -2022,9 +2123,6 @@ with tabG:
 
             st.divider()
 
-            # ====================================================
-            # Route lookup + Generate route (under Route lookup)
-            # ====================================================
             st.markdown("### Route lookup")
 
             routes_df = st.session_state.routes_df
@@ -2114,9 +2212,6 @@ with tabG:
                     else:
                         st.write("No nodes are currently highlighted for this route.")
 
-            # ----------------------------
-            # Generate route (below route lookup)
-            # ----------------------------
             st.divider()
             st.markdown("### Generate route")
 
@@ -2135,11 +2230,7 @@ with tabG:
             )
 
             if st.session_state.gen_route_mode == "Auto-route (endpoints)":
-                st.caption(
-                    "Two search bars only: each can be either an **Endpoint** or a **Tray/Conduit**.\n\n"
-                    "The picker labels now specify **Tray** vs **Conduit**. If a route cannot be generated, "
-                    "you will see a detailed reason."
-                )
+                st.caption("Two search bars: choose Endpoint OR Tray/Conduit on each side.")
 
                 start_pick = st.selectbox(
                     "Start (endpoint OR tray/conduit)",
@@ -2196,7 +2287,6 @@ with tabG:
                         st.rerun()
 
                 if st.session_state.gen_route_auto_msg and not st.session_state.gen_route_auto_via:
-                    # show last failure reason persistently
                     st.markdown("**Why it failed**")
                     st.code(st.session_state.gen_route_auto_msg)
 
@@ -2271,6 +2361,8 @@ with tabG:
                     st.session_state.tray_df["X"] = pd.NA
                     st.session_state.tray_df["Y"] = pd.NA
 
+                    st.session_state.initial_layout_autosave_active = False
+
                     st.session_state.routes_df = None
                     st.session_state.focus_node = None
                     st.session_state.sel_nodes = []
@@ -2278,6 +2370,7 @@ with tabG:
 
                     st.session_state.layout_opt_active = True
                     st.session_state.layout_opt_last_positions = None
+                    st.session_state.layout_unsaved_hint = False
                     st.session_state.graph_key_v += 1
                     st.success("Physics enabled for optimization. Let it settle, then save or cancel.")
                     st.rerun()
@@ -2296,6 +2389,7 @@ with tabG:
                         st.session_state.layout_opt_active = False
                         st.session_state.layout_opt_last_positions = None
                         st.session_state.layout_opt_backup_xy = None
+                        st.session_state.layout_unsaved_hint = False
                         st.session_state.graph_key_v += 1
                         st.success(f"Saved optimized positions for {len(positions)} node(s). Physics is now OFF.")
                         st.rerun()
@@ -2325,21 +2419,23 @@ with tabG:
                     st.session_state.layout_opt_active = False
                     st.session_state.layout_opt_last_positions = None
                     st.session_state.layout_opt_backup_xy = None
+                    st.session_state.layout_unsaved_hint = False
                     st.session_state.graph_key_v += 1
                     st.success("Optimization canceled. Previous layout restored. Physics is now OFF.")
                     st.rerun()
 
             if st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch"):
-                positions = None
+                pos = None
                 if selection:
                     try:
-                        _sn, _se, positions = selection
+                        _sn, _se, pos = selection
                     except Exception:
-                        positions = None
+                        pos = None
 
-                if positions and isinstance(positions, dict) and len(positions) > 0:
-                    st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
-                    st.success(f"Saved positions for {len(positions)} node(s). You can keep dragging and save again anytime.")
+                if pos and isinstance(pos, dict) and len(pos) > 0:
+                    st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, pos)
+                    st.session_state.layout_unsaved_hint = False
+                    st.success(f"Saved positions for {len(pos)} node(s). You can keep dragging and save again anytime.")
                     st.rerun()
                 else:
                     st.warning(
@@ -2354,8 +2450,12 @@ with tabG:
                 st.session_state.layout_opt_active = False
                 st.session_state.layout_opt_last_positions = None
                 st.session_state.layout_opt_backup_xy = None
+
+                st.session_state.initial_layout_autosave_active = True
+                st.session_state.layout_unsaved_hint = False
+
                 st.session_state.graph_key_v += 1
-                st.success("Cleared Tray.X and Tray.Y.")
+                st.success("Cleared Tray.X and Tray.Y (next render will lock in a fresh initial layout once).")
                 st.rerun()
 
 with tab5:
