@@ -435,6 +435,28 @@ def nodes_from_via_string(via: str) -> list[str]:
         cleaned.append(_strip_route_suffix(p))
     return cleaned
 
+def format_route_nodes_for_via(nodes: list[str], noise_level: int | None = None) -> str:
+    """
+    Format a node list as a Via string similar to routing output.
+    """
+    if not nodes:
+        return ""
+    suffix = ""
+    if noise_level == 1:
+        suffix = "(T6)"
+    elif noise_level == 2:
+        suffix = "(T4)"
+
+    def format_node(node: str) -> str:
+        node = str(node)
+        if "LT" in node and suffix:
+            return f"{node}{suffix}"
+        if "CND" in node:
+            return node
+        return node
+
+    return ",".join(format_node(n) for n in nodes)
+
 
 # ============================================================
 # Graph helpers (SVG nodes + seam fix + highlighting)
@@ -1001,6 +1023,184 @@ def parse_selected_edge(sel_edge) -> tuple[str | None, str | None, str]:
 
 
 # ============================================================
+# Generate route helpers (improved warnings + tray vs conduit labels)
+# ============================================================
+
+def _autoroute_pack(kind: str, value: str) -> str:
+    """
+    Combine kind+value into a single selectbox value.
+    kind: "EP" or "TRAY"
+    """
+    k = str(kind or "").strip().upper()
+    v = str(value or "").strip()
+    return f"{k}::{v}"
+
+def _autoroute_unpack(packed: str) -> tuple[str, str]:
+    """
+    Returns (kind, value) where kind is "EP" or "TRAY".
+    """
+    s = str(packed or "").strip()
+    if "::" not in s:
+        return "", s
+    k, v = s.split("::", 1)
+    return k.strip().upper(), v.strip()
+
+def _format_autoroute_option(packed: str) -> str:
+    """
+    Pretty label for the selectbox option.
+    """
+    k, v = _autoroute_unpack(packed)
+    if not v:
+        return ""
+    if k == "EP":
+        return f"Endpoint: {v}"
+    if k == "TRAY":
+        # requested: specify if tray/conduit is specifically a conduit or tray
+        t = infer_type_from_name(v)
+        if t == "Tray":
+            return f"Tray: {v}"
+        if t == "Conduit":
+            return f"Conduit: {v}"
+        return f"Node: {v}"
+    return v
+
+def _resolve_autoroute_side_to_trays(
+    net: CableNetwork,
+    kind: str,
+    value: str,
+    noise_level: int,
+) -> tuple[list[str], str]:
+    """
+    kind: "EP" or "TRAY"
+    Returns (tray_list, error_msg_if_any) with user-friendly diagnostics.
+    """
+    k = str(kind or "").strip().upper()
+    val = str(value or "").strip().lstrip("+")
+    nl = int(noise_level)
+
+    if not val:
+        return [], "Nothing selected."
+
+    if k == "TRAY":
+        if val not in net.noise_levels:
+            return [], f"{infer_type_from_name(val)} '{val}' is not present in Tray.RunName."
+        levels = net.noise_levels.get(val, set())
+        if not levels:
+            return [], f"{infer_type_from_name(val)} '{val}' has no parsed noise level (Tray.Noise Level is blank/unparseable)."
+        if nl not in levels:
+            return [], f"{infer_type_from_name(val)} '{val}' does not support Noise Level {nl} (it has {sorted(levels)})."
+        return [val], ""
+
+    # Endpoint
+    if val not in net.endpoints:
+        return [], f"Endpoint '{val}' is not present in Endpoints.device/panel."
+    all_trays = [str(t).strip() for t in (net.endpoints.get(val, []) or []) if str(t).strip()]
+    if not all_trays:
+        return [], f"Endpoint '{val}' has no tray/conduit(s) listed in Endpoints.tray/conduit(s)."
+
+    # Trays referenced by endpoint but missing from Tray sheet
+    missing = [t for t in all_trays if t not in net.noise_levels]
+    present = [t for t in all_trays if t in net.noise_levels]
+
+    if not present and missing:
+        return [], (
+            f"Endpoint '{val}' references trays/conduits that are not present in Tray.RunName: "
+            + ", ".join(sorted(set(missing)))
+        )
+
+    matches = [t for t in present if nl in (net.noise_levels.get(t, set()) or set())]
+    if not matches:
+        # explain why: present ones exist but don't match NL (plus mention missing)
+        parts = []
+        if present:
+            parts.append(
+                "No referenced trays/conduits support Noise Level "
+                f"{nl} (present: {', '.join(sorted(set(present)))})"
+            )
+        if missing:
+            parts.append(
+                "Some referenced trays/conduits are missing from Tray.RunName "
+                f"({', '.join(sorted(set(missing)))})"
+            )
+        return [], f"Endpoint '{val}': " + " | ".join(parts)
+
+    return matches, ""
+
+def try_auto_route_packed(
+    tray_df: pd.DataFrame,
+    connections_df: pd.DataFrame,
+    endpoints_df: pd.DataFrame,
+    start_packed: str,
+    end_packed: str,
+    noise_level: int,
+) -> tuple[list[str] | None, str]:
+    """
+    Auto-route where start/end are chosen from a single combined list.
+    Each packed selection is either:
+      - "EP::<endpoint name>"
+      - "TRAY::<tray/conduit RunName>"
+    Returns (path_nodes, message). If path_nodes is None, message explains why.
+    """
+    nl = int(noise_level) if noise_level is not None else None
+    if nl is None:
+        return None, "Pick a noise level."
+
+    sk, sv = _autoroute_unpack(start_packed)
+    ek, ev = _autoroute_unpack(end_packed)
+
+    if not sv and not ev:
+        return None, "Pick both start and end."
+    if not sv:
+        return None, "Pick a start."
+    if not ev:
+        return None, "Pick an end."
+
+    net = CableNetwork()
+    net.build_from_dfs(tray_df, connections_df, endpoints_df)
+
+    start_trays, start_err = _resolve_autoroute_side_to_trays(net, sk, sv, nl)
+    end_trays, end_err = _resolve_autoroute_side_to_trays(net, ek, ev, nl)
+
+    if start_err and end_err:
+        return None, f"Start issue: {start_err}\nEnd issue: {end_err}"
+    if start_err:
+        return None, f"Start issue: {start_err}"
+    if end_err:
+        return None, f"End issue: {end_err}"
+
+    # Found candidates; try BFS
+    path = net.find_route(start_trays, set(end_trays), nl)
+    if not path:
+        # Provide actionable diagnostics
+        start_desc = f"{len(start_trays)} start candidate(s): {', '.join(sorted(set(start_trays)))}"
+        end_desc = f"{len(end_trays)} end candidate(s): {', '.join(sorted(set(end_trays)))}"
+        return None, (
+            "No valid route found in the graph at Noise Level "
+            f"{nl}.\n"
+            f"{start_desc}\n"
+            f"{end_desc}\n"
+            "Likely causes:\n"
+            "- Missing/incorrect rows in Connections (graph disconnected)\n"
+            "- Trays/conduits exist but routing is blocked by noise level constraints\n"
+        )
+
+    return path, "OK"
+
+def validate_manual_route_steps(connections_df: pd.DataFrame, nodes: list[str]) -> tuple[bool, list[tuple[str, str]]]:
+    """
+    Check that each consecutive pair has an undirected edge. Returns (ok, bad_pairs).
+    """
+    if not nodes or len(nodes) < 2:
+        return True, []
+    adj = build_adjacency(connections_df)
+    bad = []
+    for a, b in zip(nodes[:-1], nodes[1:]):
+        if b not in adj.get(a, set()):
+            bad.append((a, b))
+    return (len(bad) == 0), bad
+
+
+# ============================================================
 # Streamlit UI
 # ============================================================
 
@@ -1057,9 +1257,24 @@ st.session_state.setdefault("layout_opt_backup_xy", None)
 st.session_state.setdefault("endpoint_highlight_nodes", set())
 st.session_state.setdefault("endpoint_highlight_ep", None)
 
-# NEW: route highlight state
 st.session_state.setdefault("route_highlight_nodes", set())
 st.session_state.setdefault("route_highlight_cable", None)
+
+# Generate route state
+st.session_state.setdefault("gen_route_mode", "Auto-route (endpoints)")
+st.session_state.setdefault("gen_route_noise_level", 1)
+
+# Combined search bars for auto-route
+st.session_state.setdefault("gen_route_auto_start_pick", "")
+st.session_state.setdefault("gen_route_auto_end_pick", "")
+
+st.session_state.setdefault("gen_route_auto_nodes", set())
+st.session_state.setdefault("gen_route_auto_via", "")
+st.session_state.setdefault("gen_route_auto_msg", "")
+
+st.session_state.setdefault("gen_route_manual_nodes", [])
+st.session_state.setdefault("gen_route_manual_via", "")
+st.session_state.setdefault("gen_route_manual_last_clicked", None)
 
 GRAPH_HEIGHT = 740
 
@@ -1095,6 +1310,18 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.endpoint_highlight_ep = None
     st.session_state.route_highlight_nodes = set()
     st.session_state.route_highlight_cable = None
+
+    st.session_state.gen_route_mode = "Auto-route (endpoints)"
+    st.session_state.gen_route_noise_level = 1
+    st.session_state.gen_route_auto_start_pick = ""
+    st.session_state.gen_route_auto_end_pick = ""
+    st.session_state.gen_route_auto_nodes = set()
+    st.session_state.gen_route_auto_via = ""
+    st.session_state.gen_route_auto_msg = ""
+    st.session_state.gen_route_manual_nodes = []
+    st.session_state.gen_route_manual_via = ""
+    st.session_state.gen_route_manual_last_clicked = None
+
     st.rerun()
 
 file_bytes = None
@@ -1125,6 +1352,18 @@ if file_bytes is not None:
             st.session_state.endpoint_highlight_ep = None
             st.session_state.route_highlight_nodes = set()
             st.session_state.route_highlight_cable = None
+
+            st.session_state.gen_route_mode = "Auto-route (endpoints)"
+            st.session_state.gen_route_noise_level = 1
+            st.session_state.gen_route_auto_start_pick = ""
+            st.session_state.gen_route_auto_end_pick = ""
+            st.session_state.gen_route_auto_nodes = set()
+            st.session_state.gen_route_auto_via = ""
+            st.session_state.gen_route_auto_msg = ""
+            st.session_state.gen_route_manual_nodes = []
+            st.session_state.gen_route_manual_via = ""
+            st.session_state.gen_route_manual_last_clicked = None
+
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
         st.sidebar.error(f"Failed to load workbook: {e}")
@@ -1213,6 +1452,12 @@ with tabG:
     tray_to_endpoints = build_tray_to_endpoints_map(st.session_state.endpoints_df)
     endpoint_names = sorted(endpoint_to_trays.keys(), key=lambda s: s.lower())
 
+    # Combined options for auto-route (two search bars only)
+    combined_options = [""] + (
+        [_autoroute_pack("EP", ep) for ep in endpoint_names] +
+        [_autoroute_pack("TRAY", n) for n in node_names]
+    )
+
     selection = None
 
     with graph_col:
@@ -1220,7 +1465,12 @@ with tabG:
         with graph_box:
             st.markdown('<div class="graphwrap">', unsafe_allow_html=True)
 
-            combined_highlight = set(st.session_state.endpoint_highlight_nodes or set()) | set(st.session_state.route_highlight_nodes or set())
+            combined_highlight = (
+                set(st.session_state.endpoint_highlight_nodes or set())
+                | set(st.session_state.route_highlight_nodes or set())
+                | set(st.session_state.gen_route_auto_nodes or set())
+                | set(st.session_state.gen_route_manual_nodes or [])
+            )
 
             nodes, edges = build_vis_nodes_edges(
                 st.session_state.tray_df,
@@ -1292,6 +1542,8 @@ with tabG:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+        # Capture selection + positions
+        clicked_node = None
         if selection:
             try:
                 sel_nodes, sel_edges, _pos = selection
@@ -1303,9 +1555,32 @@ with tabG:
             cleaned_nodes = [n for n in (sel_nodes or []) if str(n).strip() != PROBE_ID]
             st.session_state.sel_nodes = cleaned_nodes
             st.session_state.sel_edges = sel_edges or []
+
+            if cleaned_nodes:
+                clicked_node = str(cleaned_nodes[0]).strip()
         else:
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
+
+        # Manual route building based on clicks
+        if (
+            st.session_state.gen_route_mode == "Manual (click nodes in graph)"
+            and clicked_node
+            and clicked_node in node_names
+        ):
+            last = st.session_state.gen_route_manual_last_clicked
+            if clicked_node != last:
+                seq = list(st.session_state.gen_route_manual_nodes or [])
+                if not seq or seq[-1] != clicked_node:
+                    seq.append(clicked_node)
+                    st.session_state.gen_route_manual_nodes = seq
+                    st.session_state.gen_route_manual_via = format_route_nodes_for_via(
+                        seq,
+                        noise_level=int(st.session_state.gen_route_noise_level) if st.session_state.gen_route_noise_level is not None else None,
+                    )
+                st.session_state.gen_route_manual_last_clicked = clicked_node
+                st.session_state.graph_key_v += 1
+                st.rerun()
 
     with tools_col:
         tools_box = st.container(height=GRAPH_HEIGHT, border=True)
@@ -1457,6 +1732,10 @@ with tabG:
                     "2": "2",
                     "1,2": "1,2",
                     "2,1": "2,1",
+                    "3": "3",
+                    "4": "4",
+                    "3,4": "3,4",
+                    "4,3": "4,3",
                 }
                 presets = list(preset_map.keys())
 
@@ -1626,7 +1905,7 @@ with tabG:
             st.markdown("### Add node")
 
             new_node_name = st.text_input("New node name", value="", key="add_node_name")
-            nl_preset = st.selectbox("Noise level (preset)", options=["(leave blank)", "1", "2", "1,2"], index=0, key="add_node_nl_preset")
+            nl_preset = st.selectbox("Noise level (preset)", options=["(leave blank)", "1", "2", "1,2", "3", "4", "3,4"], index=0, key="add_node_nl_preset")
             nl_custom = st.text_input("Noise level (custom text, optional)", value="", key="add_node_nl_custom")
 
             p1, p2 = st.columns(2)
@@ -1744,7 +2023,7 @@ with tabG:
             st.divider()
 
             # ====================================================
-            # NEW: Route lookup (immediately underneath endpoint lookup)
+            # Route lookup + Generate route (under Route lookup)
             # ====================================================
             st.markdown("### Route lookup")
 
@@ -1764,7 +2043,6 @@ with tabG:
                     except Exception as e:
                         st.error(f"Routing failed: {e}")
             else:
-                # Build cable list for selectbox
                 try:
                     ccol = "Cable number" if "Cable number" in routes_df.columns else ("Cable Number" if "Cable Number" in routes_df.columns else None)
                     if ccol is None:
@@ -1800,7 +2078,6 @@ with tabG:
                             cnum = (cable_pick or "").strip()
                             st.session_state.route_highlight_cable = cnum
 
-                            # find row
                             df = routes_df.copy()
                             col = "Cable number" if "Cable number" in df.columns else ("Cable Number" if "Cable Number" in df.columns else None)
                             if col is None or "Via" not in df.columns:
@@ -1812,8 +2089,6 @@ with tabG:
                                 else:
                                     via = df.loc[mask, "Via"].iloc[0]
                                     path_nodes = nodes_from_via_string(via)
-
-                                    # only highlight nodes that exist in the graph
                                     present = [n for n in path_nodes if n in node_names]
                                     st.session_state.route_highlight_nodes = set(present)
 
@@ -1838,6 +2113,138 @@ with tabG:
                         st.write(", ".join(sorted(st.session_state.route_highlight_nodes)))
                     else:
                         st.write("No nodes are currently highlighted for this route.")
+
+            # ----------------------------
+            # Generate route (below route lookup)
+            # ----------------------------
+            st.divider()
+            st.markdown("### Generate route")
+
+            st.session_state.gen_route_mode = st.radio(
+                "Mode",
+                options=["Auto-route (endpoints)", "Manual (click nodes in graph)"],
+                index=0 if st.session_state.gen_route_mode == "Auto-route (endpoints)" else 1,
+                key="gen_route_mode_radio",
+            )
+
+            st.session_state.gen_route_noise_level = st.selectbox(
+                "Noise Level",
+                options=[1, 2, 3, 4],
+                index=[1, 2, 3, 4].index(int(st.session_state.gen_route_noise_level) if st.session_state.gen_route_noise_level else 1),
+                key="gen_route_noise_level_pick",
+            )
+
+            if st.session_state.gen_route_mode == "Auto-route (endpoints)":
+                st.caption(
+                    "Two search bars only: each can be either an **Endpoint** or a **Tray/Conduit**.\n\n"
+                    "The picker labels now specify **Tray** vs **Conduit**. If a route cannot be generated, "
+                    "you will see a detailed reason."
+                )
+
+                start_pick = st.selectbox(
+                    "Start (endpoint OR tray/conduit)",
+                    options=combined_options,
+                    index=0,
+                    key="gen_route_auto_start_pick_select",
+                    format_func=_format_autoroute_option,
+                )
+
+                end_pick = st.selectbox(
+                    "End (endpoint OR tray/conduit)",
+                    options=combined_options,
+                    index=0,
+                    key="gen_route_auto_end_pick_select",
+                    format_func=_format_autoroute_option,
+                )
+
+                g1, g2 = st.columns([1, 1])
+                with g1:
+                    if st.button("Generate auto-route", width="stretch", key="gen_route_auto_btn"):
+                        nl = int(st.session_state.gen_route_noise_level)
+
+                        path, msg = try_auto_route_packed(
+                            st.session_state.tray_df,
+                            st.session_state.connections_df,
+                            st.session_state.endpoints_df,
+                            start_pick,
+                            end_pick,
+                            nl,
+                        )
+
+                        st.session_state.gen_route_auto_msg = msg
+                        if path:
+                            present = [n for n in path if n in node_names]
+                            st.session_state.gen_route_auto_nodes = set(present)
+                            st.session_state.gen_route_auto_via = format_route_nodes_for_via(path, noise_level=nl)
+                            st.session_state.graph_key_v += 1
+                            st.success("Auto-route generated and highlighted.")
+                            st.rerun()
+                        else:
+                            st.session_state.gen_route_auto_nodes = set()
+                            st.session_state.gen_route_auto_via = ""
+                            st.session_state.graph_key_v += 1
+                            st.warning(msg)
+                            st.rerun()
+
+                with g2:
+                    if st.button("Clear generated auto-route", width="stretch", key="gen_route_auto_clear_btn"):
+                        st.session_state.gen_route_auto_nodes = set()
+                        st.session_state.gen_route_auto_via = ""
+                        st.session_state.gen_route_auto_msg = ""
+                        st.session_state.graph_key_v += 1
+                        st.success("Cleared generated auto-route.")
+                        st.rerun()
+
+                if st.session_state.gen_route_auto_msg and not st.session_state.gen_route_auto_via:
+                    # show last failure reason persistently
+                    st.markdown("**Why it failed**")
+                    st.code(st.session_state.gen_route_auto_msg)
+
+                if st.session_state.gen_route_auto_via:
+                    st.markdown("**Generated Via**")
+                    st.code(st.session_state.gen_route_auto_via)
+
+            else:
+                st.caption(
+                    "Click nodes in the graph (one-by-one) to build a route. "
+                    "Nodes will highlight as you click, and the Via string updates live."
+                )
+
+                m1, m2 = st.columns([1, 1])
+                with m1:
+                    if st.button("Clear manual route", width="stretch", key="gen_route_manual_clear_btn"):
+                        st.session_state.gen_route_manual_nodes = []
+                        st.session_state.gen_route_manual_via = ""
+                        st.session_state.gen_route_manual_last_clicked = None
+                        st.session_state.graph_key_v += 1
+                        st.success("Cleared manual route.")
+                        st.rerun()
+
+                with m2:
+                    if st.button("Clear ALL generated routes", width="stretch", key="gen_route_clear_all_btn"):
+                        st.session_state.gen_route_auto_nodes = set()
+                        st.session_state.gen_route_auto_via = ""
+                        st.session_state.gen_route_auto_msg = ""
+                        st.session_state.gen_route_manual_nodes = []
+                        st.session_state.gen_route_manual_via = ""
+                        st.session_state.gen_route_manual_last_clicked = None
+                        st.session_state.graph_key_v += 1
+                        st.success("Cleared auto + manual generated routes.")
+                        st.rerun()
+
+                if st.session_state.gen_route_manual_nodes:
+                    ok, bad_pairs = validate_manual_route_steps(st.session_state.connections_df, st.session_state.gen_route_manual_nodes)
+                    if not ok:
+                        st.warning(
+                            "Manual route has step(s) that are not directly connected in Connections:\n\n"
+                            + "\n".join([f"- {a} ↔ {b}" for a, b in bad_pairs])
+                        )
+
+                st.markdown("**Manual route nodes**")
+                st.write(" → ".join(st.session_state.gen_route_manual_nodes) if st.session_state.gen_route_manual_nodes else "(none yet)")
+
+                st.markdown("**Generated Via (live)**")
+                st.code(st.session_state.gen_route_manual_via or "")
 
             st.divider()
 
