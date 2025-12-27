@@ -489,9 +489,6 @@ def ensure_xy_columns(tray_df: pd.DataFrame) -> pd.DataFrame:
     return tray_df
 
 def tray_has_any_xy(tray_df: pd.DataFrame) -> bool:
-    """
-    True if there exists at least one row with BOTH X and Y numeric/non-null.
-    """
     if tray_df is None or tray_df.empty:
         return False
     df = ensure_xy_columns(tray_df)
@@ -805,9 +802,6 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
 # ============================================================
 
 def _tray_xy_map(tray_df: pd.DataFrame) -> dict[str, tuple[float | None, float | None]]:
-    """
-    Map RunName -> (x,y) from Tray.X/Y. Non-numeric/blank => None.
-    """
     df = ensure_xy_columns(tray_df)
     out: dict[str, tuple[float | None, float | None]] = {}
     if df is None or df.empty or "RunName" not in df.columns:
@@ -833,9 +827,6 @@ def _tray_xy_map(tray_df: pd.DataFrame) -> dict[str, tuple[float | None, float |
     return out
 
 def _positions_map(positions: dict) -> dict[str, tuple[float | None, float | None]]:
-    """
-    Map node_id -> (x,y) from vis positions dict. Non-numeric => None. Skips probe.
-    """
     out: dict[str, tuple[float | None, float | None]] = {}
     if not isinstance(positions, dict):
         return out
@@ -860,10 +851,6 @@ def _positions_map(positions: dict) -> dict[str, tuple[float | None, float | Non
     return out
 
 def _has_unsaved_layout_changes(tray_df: pd.DataFrame, last_positions: dict | None, tol: float = 0.5) -> bool:
-    """
-    True if last_positions differs from Tray X/Y for any node where both sides have numbers.
-    tol: pixel tolerance (vis can shift small floating jitter)
-    """
     if not isinstance(last_positions, dict) or not last_positions:
         return False
 
@@ -1321,10 +1308,8 @@ st.session_state.setdefault("endpoint_highlight_ep", None)
 st.session_state.setdefault("route_highlight_nodes", set())
 st.session_state.setdefault("route_highlight_cable", None)
 
-# NEW: one-time initial lock-in of layout (only when X/Y are blank on initial load)
 st.session_state.setdefault("initial_layout_autosave_active", False)
 
-# Generate route state
 st.session_state.setdefault("gen_route_mode", "Auto-route (endpoints)")
 st.session_state.setdefault("gen_route_noise_level", 1)
 st.session_state.setdefault("gen_route_auto_nodes", set())
@@ -1335,8 +1320,13 @@ st.session_state.setdefault("gen_route_manual_nodes", [])
 st.session_state.setdefault("gen_route_manual_via", "")
 st.session_state.setdefault("gen_route_manual_last_clicked", None)
 
-# UNSAVED LAYOUT REMINDER: store last-known reminder state (optional, but helps avoid flicker)
 st.session_state.setdefault("layout_unsaved_hint", False)
+
+# Save positions notice (must render BELOW the button)
+st.session_state.setdefault("save_positions_notice", None)  # ("success"/"warning"/"info"/"error", "message")
+
+# Track graph interactions so we can CLEAR the notice when user clicks/drags/changes graph
+st.session_state.setdefault("graph_interaction_sig", None)
 
 GRAPH_HEIGHT = 740
 
@@ -1385,6 +1375,8 @@ if st.sidebar.button("Clear workbook", key="clear_workbook_btn"):
     st.session_state.gen_route_manual_last_clicked = None
 
     st.session_state.layout_unsaved_hint = False
+    st.session_state.save_positions_notice = None
+    st.session_state.graph_interaction_sig = None
 
     st.rerun()
 
@@ -1431,6 +1423,8 @@ if file_bytes is not None:
             st.session_state.gen_route_manual_last_clicked = None
 
             st.session_state.layout_unsaved_hint = False
+            st.session_state.save_positions_notice = None
+            st.session_state.graph_interaction_sig = None
 
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
@@ -1529,6 +1523,7 @@ with tabG:
     )
 
     selection = None
+    this_run_sig = None
 
     with graph_col:
         graph_box = st.container(border=True)
@@ -1616,6 +1611,8 @@ with tabG:
 
         clicked_node = None
         positions = None
+        sel_nodes = []
+        sel_edges = []
 
         if selection:
             try:
@@ -1632,10 +1629,45 @@ with tabG:
             if cleaned_nodes:
                 clicked_node = str(cleaned_nodes[0]).strip()
         else:
+            sel_nodes, sel_edges, positions = [], [], None
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
 
-        # UNSAVED LAYOUT REMINDER: update flag whenever we have a positions snapshot
+        def _positions_sig(pos: dict | None):
+            if not isinstance(pos, dict) or not pos:
+                return (0, 0, 0)
+            items = [(k, v) for k, v in pos.items() if str(k).strip() != PROBE_ID]
+            n = len(items)
+            sx = sy = 0.0
+            for k, v in items[:15]:
+                x = y = 0.0
+                if isinstance(v, dict):
+                    x = float(v.get("x", 0.0) or 0.0)
+                    y = float(v.get("y", 0.0) or 0.0)
+                elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                    try:
+                        x = float(v[0] or 0.0)
+                        y = float(v[1] or 0.0)
+                    except Exception:
+                        x = y = 0.0
+                sx += x
+                sy += y
+            return (n, round(sx, 1), round(sy, 1))
+
+        this_run_sig = (
+            tuple([str(x).strip() for x in (sel_nodes or []) if str(x).strip() != PROBE_ID]),
+            tuple([str(x) for x in (sel_edges or [])][:3]),
+            _positions_sig(positions),
+        )
+
+        # Clear message on real graph interaction, BUT not immediately after a "Save" forced refresh.
+        if st.session_state.graph_interaction_sig is None:
+            st.session_state.graph_interaction_sig = this_run_sig
+        else:
+            if this_run_sig != st.session_state.graph_interaction_sig:
+                st.session_state.graph_interaction_sig = this_run_sig
+                st.session_state.save_positions_notice = None
+
         if (not st.session_state.layout_opt_active) and isinstance(st.session_state.layout_opt_last_positions, dict):
             st.session_state.layout_unsaved_hint = _has_unsaved_layout_changes(
                 st.session_state.tray_df,
@@ -1645,7 +1677,6 @@ with tabG:
         else:
             st.session_state.layout_unsaved_hint = False
 
-        # One-time initial autosave
         if (
             st.session_state.initial_layout_autosave_active
             and (not st.session_state.layout_opt_active)
@@ -1658,7 +1689,6 @@ with tabG:
             st.success("Initial layout locked in and saved to Tray (X/Y).")
             st.rerun()
 
-        # Manual route building based on clicks
         if (
             st.session_state.gen_route_mode == "Manual (click nodes in graph)"
             and clicked_node
@@ -1682,7 +1712,6 @@ with tabG:
         tools_box = st.container(height=GRAPH_HEIGHT, border=True)
         with tools_box:
 
-            # UNSAVED LAYOUT REMINDER: show banner at top of tools panel
             if st.session_state.layout_unsaved_hint and (not st.session_state.layout_opt_active):
                 st.warning(
                     "You have **unsaved node position changes**.\n\n"
@@ -1691,11 +1720,11 @@ with tabG:
 
             st.markdown("### Selection")
 
-            sel_nodes = st.session_state.sel_nodes or []
-            sel_edges = st.session_state.sel_edges or []
+            sel_nodes2 = st.session_state.sel_nodes or []
+            sel_edges2 = st.session_state.sel_edges or []
 
-            if sel_nodes:
-                node_id = str(sel_nodes[0]).strip()
+            if sel_nodes2:
+                node_id = str(sel_nodes2[0]).strip()
                 tdf = st.session_state.tray_df
                 row = tdf[tdf["RunName"].astype(str).str.strip() == node_id]
                 noise_val = ""
@@ -1878,8 +1907,8 @@ with tabG:
                     else:
                         st.error("Could not update noise level for the selected node.")
 
-            elif sel_edges:
-                raw_edge = sel_edges[0]
+            elif sel_edges2:
+                raw_edge = sel_edges2[0]
                 a, b, disp = parse_selected_edge(raw_edge)
 
                 st.markdown("**Selected Connection**")
@@ -2382,16 +2411,16 @@ with tabG:
                 )
 
                 if st.button("Save optimized positions (turns off physics)", key="save_opt_positions_btn", width="stretch"):
-                    positions = st.session_state.layout_opt_last_positions
+                    positions2 = st.session_state.layout_opt_last_positions
 
-                    if positions and isinstance(positions, dict) and len(positions) > 0:
-                        st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions)
+                    if positions2 and isinstance(positions2, dict) and len(positions2) > 0:
+                        st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions2)
                         st.session_state.layout_opt_active = False
                         st.session_state.layout_opt_last_positions = None
                         st.session_state.layout_opt_backup_xy = None
                         st.session_state.layout_unsaved_hint = False
                         st.session_state.graph_key_v += 1
-                        st.success(f"Saved optimized positions for {len(positions)} node(s). Physics is now OFF.")
+                        st.success(f"Saved optimized positions for {len(positions2)} node(s). Physics is now OFF.")
                         st.rerun()
                     else:
                         st.warning(
@@ -2424,24 +2453,77 @@ with tabG:
                     st.success("Optimization canceled. Previous layout restored. Physics is now OFF.")
                     st.rerun()
 
-            if st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch"):
-                pos = None
-                if selection:
-                    try:
-                        _sn, _se, pos = selection
-                    except Exception:
-                        pos = None
+            # ------------------------------------------------------------
+            # Save current positions
+            # FIXED: after successful save, force graph re-mount so it
+            # shows the saved layout immediately (no “stale view”).
+            # Also reset graph_interaction_sig to avoid auto-clearing
+            # the success message on that forced refresh.
+            # ------------------------------------------------------------
+            save_clicked = st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch")
 
-                if pos and isinstance(pos, dict) and len(pos) > 0:
+            # Placeholder is DEFINITELY below the button
+            save_notice_slot = st.empty()
+
+            if save_clicked:
+                pos = None
+                sn = se = None
+                try:
+                    if selection:
+                        sn, se, pos = selection
+                except Exception:
+                    sn, se, pos = None, None, None
+
+                if isinstance(pos, dict) and len(pos) > 0:
                     st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, pos)
                     st.session_state.layout_unsaved_hint = False
-                    st.success(f"Saved positions for {len(pos)} node(s). You can keep dragging and save again anytime.")
+
+                    # Keep message visible + immediately refresh graph instance
+                    st.session_state.save_positions_notice = ("success", "✅ Positions saved to Tray (X/Y).")
+
+                    # IMPORTANT: prevent the forced refresh from being interpreted as "user interaction"
+                    st.session_state.graph_interaction_sig = None
+
+                    # IMPORTANT: remount the vis network so it uses saved X/Y right away
+                    st.session_state.graph_key_v += 1
+
+                    # optional: clear selection so user sees a clean graph post-save
+                    st.session_state.sel_nodes = []
+                    st.session_state.sel_edges = []
+
                     st.rerun()
                 else:
-                    st.warning(
-                        "No positions were returned yet.\n\n"
-                        "✅ Drag a node, then click an empty area of the graph once, then click **Save** again."
+                    sel_active = bool(
+                        (sn and len(sn) > 0) or
+                        (se and len(se) > 0) or
+                        (st.session_state.sel_nodes) or
+                        (st.session_state.sel_edges)
                     )
+                    if sel_active:
+                        st.session_state.save_positions_notice = (
+                            "warning",
+                            "No positions were returned.\n\n"
+                            "✅ Fix:\n"
+                            "- Click **empty space in the graph** (to deselect the node/connection)\n"
+                            "- Then click **Save** again."
+                        )
+                    else:
+                        st.session_state.save_positions_notice = (
+                            "warning",
+                            "No positions were returned yet.\n\n"
+                            "✅ Try dragging any node slightly, then click **Save** again."
+                        )
+
+            if st.session_state.save_positions_notice:
+                lvl, txt = st.session_state.save_positions_notice
+                if lvl == "success":
+                    save_notice_slot.success(txt)
+                elif lvl == "warning":
+                    save_notice_slot.warning(txt)
+                elif lvl == "info":
+                    save_notice_slot.info(txt)
+                else:
+                    save_notice_slot.error(txt)
 
             if st.button("Clear saved positions (blank X/Y)", key="clear_positions_btn", width="stretch"):
                 st.session_state.tray_df["X"] = pd.NA
@@ -2454,7 +2536,10 @@ with tabG:
                 st.session_state.initial_layout_autosave_active = True
                 st.session_state.layout_unsaved_hint = False
 
+                st.session_state.save_positions_notice = ("info", "Cleared Tray.X and Tray.Y. A fresh initial layout will lock in once on next render.")
+                st.session_state.graph_interaction_sig = None
                 st.session_state.graph_key_v += 1
+
                 st.success("Cleared Tray.X and Tray.Y (next render will lock in a fresh initial layout once).")
                 st.rerun()
 
