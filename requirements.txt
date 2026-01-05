@@ -5,3 +5,4 @@ networkx
 pyvis
 matplotlib
 streamlit-agraph
+streamlit-vis-network
