@@ -108,7 +108,7 @@ class CableNetwork:
                 continue
             exposed_flag = False
             try:
-                val = row.get("Exposed Conduit Route?", "")
+                val = row.get("Exposed?", "")
                 if str(val).strip().lower() == "yes":
                     exposed_flag = True
             except Exception:
@@ -277,7 +277,7 @@ def reverse_engineer_from_routes(xlsx_path: str):
       - Endpoints sheet:
           * One row per device/panel
           * tray/conduit(s): ALL possible endpoint trays for that device, comma-separated, NO SPACES
-          * Exposed Conduit Route?: "yes" if any occurrence for that device had EXPOSED at that end
+          * Exposed?: "yes" if any occurrence for that device had EXPOSED at that end
 
     Also returns the original Cables(input) + CableRoutes(output) DataFrames (if present)
     so they can be written into the reconstructed workbook unchanged.
@@ -392,7 +392,7 @@ def reverse_engineer_from_routes(xlsx_path: str):
          for name in sorted(trays_seen)]
     )
     connections_df = pd.DataFrame(
-        [{"From": a, "To": b, "Exposed Conduit Route?": "yes" if (a, b) in exposed_edges else ""}
+        [{"From": a, "To": b, "Exposed?": "yes" if (a, b) in exposed_edges else ""}
          for a, b in sorted(connections)]
     )
 
@@ -404,7 +404,7 @@ def reverse_engineer_from_routes(xlsx_path: str):
         endpoint_rows.append({
             "device/panel": dev,
             "tray/conduit(s)": trays_joined,
-            "Exposed Conduit Route?": "yes" if device_exposed_yes.get(dev, False) else "no"
+            "Exposed?": "yes" if device_exposed_yes.get(dev, False) else "no"
         })
 
     endpoints_df = pd.DataFrame(endpoint_rows)
@@ -435,9 +435,9 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
         if sh == "Tray":
             converters = {"RunName": str, "Noise Level": str}
         elif sh == "Connections":
-            converters = {"From": str, "To": str, "Exposed Conduit Route?": str}
+            converters = {"From": str, "To": str, "Exposed?": str}
         elif sh == "Endpoints":
-            converters = {"device/panel": str, "tray/conduit(s)": str, "Exposed": str}
+            converters = {"device/panel": str, "tray/conduit(s)": str, "Exposed?": str}
         elif sh == "Cables(input)":
             converters = {
                 "Cable number": str,
@@ -449,10 +449,12 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
 
         dfs[sh] = pd.read_excel(xls, sh, converters=converters)
     
-    # Ensure Connections has "Exposed Conduit Route?" column (for backwards compatibility)
+    # Ensure Connections has "Exposed?" column (for backwards compatibility)
     if "Connections" in dfs:
-        if "Exposed Conduit Route?" not in dfs["Connections"].columns:
-            dfs["Connections"]["Exposed Conduit Route?"] = ""
+        if "Exposed?" not in dfs["Connections"].columns and "Exposed Conduit Route?" not in dfs["Connections"].columns:
+            dfs["Connections"]["Exposed?"] = ""
+        elif "Exposed Conduit Route?" in dfs["Connections"].columns and "Exposed?" not in dfs["Connections"].columns:
+            dfs["Connections"].rename(columns={"Exposed Conduit Route?": "Exposed?"}, inplace=True)
     
     return dfs
 
@@ -504,9 +506,12 @@ def validate_dfs(dfs: dict) -> list[str]:
         "Cables(input)": {"Cable number", "equipfrom", "equipto", "Noise Level"},
     }
     
-    # Ensure Connections has "Exposed Conduit Route?" column (add if missing)
-    if "Connections" in dfs and "Exposed Conduit Route?" not in dfs["Connections"].columns:
-        dfs["Connections"]["Exposed Conduit Route?"] = ""
+    # Ensure Connections has "Exposed?" column (add if missing)
+    if "Connections" in dfs:
+        if "Exposed?" not in dfs["Connections"].columns and "Exposed Conduit Route?" not in dfs["Connections"].columns:
+            dfs["Connections"]["Exposed?"] = ""
+        elif "Exposed Conduit Route?" in dfs["Connections"].columns and "Exposed?" not in dfs["Connections"].columns:
+            dfs["Connections"].rename(columns={"Exposed Conduit Route?": "Exposed?"}, inplace=True)
     
     for sh, cols in expected_cols.items():
         missing = cols - set(dfs[sh].columns)
@@ -548,29 +553,29 @@ def build_demo_workbook_bytes() -> bytes:
     ])
 
     connections = pd.DataFrame([
-        {"From": "LT-01", "To": "LT-02", "Exposed Conduit Route?": ""},
-        {"From": "LT-02", "To": "LT-03", "Exposed Conduit Route?": ""},
-        {"From": "LT-02", "To": "LT-04", "Exposed Conduit Route?": ""},
-        {"From": "LT-03", "To": "CND-01", "Exposed Conduit Route?": ""},
+        {"From": "LT-01", "To": "LT-02", "Exposed?": ""},
+        {"From": "LT-02", "To": "LT-03", "Exposed?": ""},
+        {"From": "LT-02", "To": "LT-04", "Exposed?": ""},
+        {"From": "LT-03", "To": "CND-01", "Exposed?": ""},
 
-        {"From": "LT-11", "To": "LT-12", "Exposed Conduit Route?": ""},
-        {"From": "LT-12", "To": "LT-13", "Exposed Conduit Route?": ""},
-        {"From": "LT-12", "To": "LT-14", "Exposed Conduit Route?": ""},
-        {"From": "LT-13", "To": "CND-02", "Exposed Conduit Route?": ""},
+        {"From": "LT-11", "To": "LT-12", "Exposed?": ""},
+        {"From": "LT-12", "To": "LT-13", "Exposed?": ""},
+        {"From": "LT-12", "To": "LT-14", "Exposed?": ""},
+        {"From": "LT-13", "To": "CND-02", "Exposed?": ""},
 
-        {"From": "CND-01", "To": "LT-20", "Exposed Conduit Route?": ""},
-        {"From": "CND-02", "To": "LT-20", "Exposed Conduit Route?": ""},
-        {"From": "LT-20",  "To": "CND-20", "Exposed Conduit Route?": ""},
+        {"From": "CND-01", "To": "LT-20", "Exposed?": ""},
+        {"From": "CND-02", "To": "LT-20", "Exposed?": ""},
+        {"From": "LT-20",  "To": "CND-20", "Exposed?": ""},
 
-        {"From": "LT-04",  "To": "LT-20", "Exposed Conduit Route?": ""},
-        {"From": "LT-14",  "To": "LT-20", "Exposed Conduit Route?": ""},
+        {"From": "LT-04",  "To": "LT-20", "Exposed?": ""},
+        {"From": "LT-14",  "To": "LT-20", "Exposed?": ""},
     ])
 
     endpoints = pd.DataFrame([
-        {"device/panel": "PANEL-A", "tray/conduit(s)": "LT-01,LT-11", "Exposed": ""},
-        {"device/panel": "PANEL-B", "tray/conduit(s)": "LT-03,LT-13", "Exposed": "yes"},
-        {"device/panel": "PANEL-C", "tray/conduit(s)": "LT-04",       "Exposed": ""},
-        {"device/panel": "PANEL-D", "tray/conduit(s)": "LT-14",       "Exposed": ""},
+        {"device/panel": "PANEL-A", "tray/conduit(s)": "LT-01,LT-11", "Exposed?": ""},
+        {"device/panel": "PANEL-B", "tray/conduit(s)": "LT-03,LT-13", "Exposed?": "yes"},
+        {"device/panel": "PANEL-C", "tray/conduit(s)": "LT-04",       "Exposed?": ""},
+        {"device/panel": "PANEL-D", "tray/conduit(s)": "LT-14",       "Exposed?": ""},
     ])
 
     cables = pd.DataFrame([
@@ -998,7 +1003,7 @@ def build_vis_nodes_edges(
             }
             
             # Add "EXP" label if exposed
-            exposed_val = r.get("Exposed Conduit Route?", "")
+            exposed_val = r.get("Exposed?", "")
             if str(exposed_val).strip().lower() == "yes":
                 edge_data["label"] = "EXP"
                 edge_data["font"] = {"size": 14, "align": "middle"}
@@ -1725,7 +1730,7 @@ with tab1:
 
 with tab2:
     st.subheader("Connections")
-    st.caption("The 'Exposed Conduit Route?' column allows marking edges as exposed (yes/no or blank).")
+    st.caption("The 'Exposed?' column allows marking edges as exposed (yes/no or blank).")
     st.session_state.connections_df = st.data_editor(
         st.session_state.connections_df,
         num_rows="dynamic",
@@ -2904,13 +2909,13 @@ with tab_reverse:
             
             # Display results
             st.subheader("Reconstructed Tray")
-            st.dataframe(re_tray_df, use_container_width=True)
+            st.dataframe(re_tray_df, width='stretch')
             
             st.subheader("Reconstructed Connections")
-            st.dataframe(re_connections_df, use_container_width=True)
+            st.dataframe(re_connections_df, width='stretch')
             
             st.subheader("Reconstructed Endpoints")
-            st.dataframe(re_endpoints_df, use_container_width=True)
+            st.dataframe(re_endpoints_df, width='stretch')
             
             # Create download for reconstructed workbook
             re_output = BytesIO()
