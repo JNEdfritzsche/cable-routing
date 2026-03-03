@@ -1006,7 +1006,8 @@ def build_vis_nodes_edges(
             exposed_val = r.get("Exposed?", "")
             if str(exposed_val).strip().lower() == "yes":
                 edge_data["label"] = "EXP"
-                edge_data["font"] = {"size": 14, "align": "middle"}
+                edge_data["font"] = {"size": 18, "align": "middle", "color": "red"}
+                edge_data["labelHighlightBold"] = True
             
             edges.append(edge_data)
 
@@ -1203,6 +1204,47 @@ def df_add_edge(connections_df: pd.DataFrame, a: str, b: str) -> tuple[pd.DataFr
     new_row["To"] = b
     con = pd.concat([con, pd.DataFrame([new_row])], ignore_index=True)
     return con, True
+
+def get_edge_exposed_status(connections_df: pd.DataFrame, a: str, b: str) -> bool:
+    """Get whether an edge is marked as exposed."""
+    a = str(a).strip()
+    b = str(b).strip()
+    
+    if "From" not in connections_df.columns or "To" not in connections_df.columns:
+        return False
+    
+    def is_match(r):
+        x = str(r.get("From", "")).strip()
+        y = str(r.get("To", "")).strip()
+        return set([x, y]) == set([a, b])
+    
+    for _, row in connections_df.iterrows():
+        if is_match(row):
+            exposed_val = row.get("Exposed?", "")
+            return str(exposed_val).strip().lower() == "yes"
+    
+    return False
+
+def set_edge_exposed_status(connections_df: pd.DataFrame, a: str, b: str, exposed: bool) -> pd.DataFrame:
+    """Set whether an edge is marked as exposed."""
+    a = str(a).strip()
+    b = str(b).strip()
+    
+    if "From" not in connections_df.columns or "To" not in connections_df.columns:
+        return connections_df
+    
+    con = connections_df.copy()
+    
+    def is_match(r):
+        x = str(r.get("From", "")).strip()
+        y = str(r.get("To", "")).strip()
+        return set([x, y]) == set([a, b])
+    
+    for idx, row in con.iterrows():
+        if is_match(row):
+            con.at[idx, "Exposed?"] = "yes" if exposed else ""
+    
+    return con
 
 def _compute_default_xy_near_network(tray_df: pd.DataFrame) -> tuple[float | None, float | None]:
     df = ensure_xy_columns(tray_df)
@@ -2185,6 +2227,25 @@ with tabG:
                 else:
                     st.write(f"**From:** {a}")
                     st.write(f"**To:** {b}")
+                    st.divider()
+                    
+                    # Exposed checkbox
+                    current_exposed = get_edge_exposed_status(st.session_state.connections_df, a, b)
+                    new_exposed = st.checkbox(
+                        "Exposed Conduit Route",
+                        value=current_exposed,
+                        key="edge_exposed_checkbox",
+                    )
+                    
+                    if new_exposed != current_exposed:
+                        st.session_state.connections_df = set_edge_exposed_status(
+                            st.session_state.connections_df, a, b, new_exposed
+                        )
+                        st.session_state.routes_df = None
+                        st.session_state.graph_key_v += 1
+                        st.success("Exposed status updated. Rerendering graph...")
+                        st.rerun()
+                    
                     st.divider()
 
                     if st.button("Delete connection", key="sel_delete_edge", width="stretch"):
