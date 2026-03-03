@@ -18,6 +18,8 @@ class CableNetwork:
         self.noise_levels = {}
         self.endpoints = defaultdict(list)
         self.endpoint_exposed = {}
+        self.edge_exposed = {}  # (sorted_a, sorted_b) -> bool
+        self.edge_exposed = {}  # (sorted_a, sorted_b) -> bool
 
     @staticmethod
     def _infer_noise_from_name(run_name: str):
@@ -55,10 +57,13 @@ class CableNetwork:
         if name not in self.graph:
             self.graph[name] = []
 
-    def connect(self, from_node, to_node):
+    def connect(self, from_node, to_node, exposed=False):
         if from_node in self.noise_levels and to_node in self.noise_levels:
             self.graph[from_node].append((to_node, self.noise_levels[to_node]))
             self.graph[to_node].append((from_node, self.noise_levels[from_node]))
+            edge_key = tuple(sorted([from_node, to_node]))
+            if exposed:
+                self.edge_exposed[edge_key] = True
 
     def register_endpoint(self, device_name, tray_or_conduits, exposed=None):
         device_name = str(device_name).strip().lstrip("+")
@@ -101,7 +106,14 @@ class CableNetwork:
             b = row.get("To", None)
             if pd.isna(a) or pd.isna(b):
                 continue
-            self.connect(str(a).strip(), str(b).strip())
+            exposed_flag = False
+            try:
+                val = row.get("Exposed Conduit Route?", "")
+                if str(val).strip().lower() == "yes":
+                    exposed_flag = True
+            except Exception:
+                pass
+            self.connect(str(a).strip(), str(b).strip(), exposed=exposed_flag)
 
         for _, row in endpoints_df.iterrows():
             device = row.get("device/panel", "")
@@ -188,6 +200,12 @@ class CableNetwork:
 
                     FROM_exposed = self.endpoint_exposed.get(cable["start"], False)
                     TO_exposed = self.endpoint_exposed.get(cable["end"], False)
+                    
+                    # Check for exposed edges along the path
+                    for i in range(len(path) - 1):
+                        edge_key = tuple(sorted([path[i], path[i+1]]))
+                        if self.edge_exposed.get(edge_key, False):
+                            parts[i+1] = "EXPOSED CONDUIT ROUTE," + parts[i+1]
 
                     if FROM_exposed:
                         parts.insert(0, "EXPOSED CONDUIT ROUTE")
@@ -211,6 +229,197 @@ class CableNetwork:
 
 
 # ============================================================
+# Reverse Engineering (from routed workbook)
+# ============================================================
+
+import re
+from itertools import pairwise
+
+SUFFIX_RE = re.compile(r"\s*\((?:T6|T4)\)$")
+EXPOSED_SENTINEL = "EXPOSED CONDUIT ROUTE"
+
+def normalize_node(name: str) -> str:
+    """Strip display suffixes '(T6)/(T4)' from Via tokens to get the canonical node id."""
+    return SUFFIX_RE.sub("", str(name or "").strip())
+
+def levels_from_suffix(token: str) -> set:
+    """Return {1} if '(T6)' present, {2} if '(T4)' present, else empty set."""
+    s = str(token or "")
+    levels = set()
+    if "(T6)" in s:
+        levels.add(1)
+    if "(T4)" in s:
+        levels.add(2)
+    return levels
+
+def clamp_valid_levels(levels: set) -> set:
+    """Keep only valid levels in {1,2,3,4}."""
+    return {lvl for lvl in (levels or set()) if lvl in {1,2,3,4}}
+
+def levels_to_cell_value(levels: set):
+    """
+    Convert a set to what the Tray sheet expects:
+    - {1} -> 1
+    - {1,2} -> "1,2"
+    - empty -> ""
+    """
+    if not levels:
+        return ""
+    if len(levels) == 1:
+        return next(iter(levels))
+    return ",".join(str(x) for x in sorted(levels))
+
+def reverse_engineer_from_routes(xlsx_path: str):
+    """
+    Reads 'CableRoutes(output)' sheet and reconstructs:
+      - Tray sheet: RunName, Noise Level (supports multi-level like "1,2")
+      - Connections sheet: From, To
+      - Endpoints sheet:
+          * One row per device/panel
+          * tray/conduit(s): ALL possible endpoint trays for that device, comma-separated, NO SPACES
+          * Exposed Conduit Route?: "yes" if any occurrence for that device had EXPOSED at that end
+
+    Also returns the original Cables(input) + CableRoutes(output) DataFrames (if present)
+    so they can be written into the reconstructed workbook unchanged.
+    """
+    xls = pd.ExcelFile(xlsx_path)
+
+    # --- Original sheets to carry through (if present) ---
+    if "CableRoutes(output)" not in xls.sheet_names:
+        raise ValueError("Uploaded workbook is missing 'CableRoutes(output)' sheet.")
+
+    df_routes_original = pd.read_excel(xls, sheet_name="CableRoutes(output)")
+    df_routes = df_routes_original
+
+    df_cables_input_original = None
+    if "Cables(input)" in xls.sheet_names:
+        df_cables_input_original = pd.read_excel(xls, sheet_name="Cables(input)")
+
+    trays_seen = set()
+    connections = set()  # undirected (a,b) with a<b
+    exposed_edges = set()  # edges marked as exposed (a,b) with a<b
+    node_levels = {}     # node -> set of supported levels
+
+    # device -> set of endpoint trays
+    device_to_trays = {}
+    # device -> exposed_yes_bool (aggregated)
+    device_exposed_yes = {}
+
+    for _, row in df_routes.iterrows():
+        via_raw = str(row.get("Via", "")).strip()
+        if not via_raw or "Error" in via_raw or "No valid route" in via_raw:
+            continue
+
+        # Column E: Noise Level (per cable)
+        cable_levels = set()
+        try:
+            nl = int(row.get("Noise Level", None))
+            if nl in {1, 2, 3, 4}:
+                cable_levels.add(nl)
+        except Exception:
+            pass
+
+        # Parse route from Via
+        tokens_raw_all = [p.strip() for p in via_raw.split(",") if p.strip()]
+        if not tokens_raw_all:
+            continue
+
+        tokens_norm_all = [normalize_node(p) for p in tokens_raw_all]
+        is_exposed_all = [t.strip().upper() == EXPOSED_SENTINEL for t in tokens_norm_all]
+
+        # Filter out EXPOSED entirely for trays, node_levels, and connections
+        filtered_pairs = [(r, n) for r, n, ex in zip(tokens_raw_all, tokens_norm_all, is_exposed_all) if not ex]
+        tokens_raw = [r for r, _ in filtered_pairs]
+        tokens_norm = [n for _, n in filtered_pairs]
+
+        # If filtering removed everything, we cannot build endpoints or network
+        if not tokens_norm:
+            continue
+
+        # Track nodes + noise evidence (only for non-EXPOSED nodes)
+        for raw_tok, norm_tok in zip(tokens_raw, tokens_norm):
+            trays_seen.add(norm_tok)
+            inferred = levels_from_suffix(raw_tok) | cable_levels
+            if inferred:
+                node_levels.setdefault(norm_tok, set()).update(inferred)
+
+        # Build undirected edges among non-EXPOSED nodes
+        # Also detect exposed edges: if an EXPOSED token appears between two nodes, mark that edge as exposed
+        for i, (a, b) in enumerate(pairwise(tokens_norm)):
+            edge = tuple(sorted([a, b]))
+            connections.add(edge)
+            
+            # Check if there was an EXPOSED token between these nodes in the original sequence
+            # We need to check the original is_exposed_all to see if any EXPOSED came between them
+            # Map indices: if we're at pair (tokens_norm[i], tokens_norm[i+1]), 
+            # we need to check all original indices to find the indices of these tokens
+            # and see if any EXPOSED was between them
+            try:
+                idx_a = tokens_norm_all.index(a)
+                idx_b = tokens_norm_all.index(b)
+                # Check if any EXPOSED is between these indices in original
+                has_exposed_between = any(is_exposed_all[j] for j in range(min(idx_a, idx_b) + 1, max(idx_a, idx_b)))
+                if has_exposed_between:
+                    exposed_edges.add(edge)
+            except Exception:
+                pass
+
+        # --- Endpoint assignment with EXPOSED awareness for "use" flag ---
+        start_dev = str(row.get("equipfrom", "")).strip().lstrip("+")
+        end_dev   = str(row.get("equipto", "")).strip().lstrip("+")
+
+        start_had_exposed = (len(is_exposed_all) > 0 and is_exposed_all[0] is True)
+        end_had_exposed   = (len(is_exposed_all) > 0 and is_exposed_all[-1] is True)
+
+        start_endpoint = tokens_norm[0]
+        end_endpoint   = tokens_norm[-1]
+
+        if start_dev:
+            device_to_trays.setdefault(start_dev, set()).add(start_endpoint)
+            device_exposed_yes[start_dev] = bool(device_exposed_yes.get(start_dev, False) or start_had_exposed)
+
+        if end_dev:
+            device_to_trays.setdefault(end_dev, set()).add(end_endpoint)
+            device_exposed_yes[end_dev] = bool(device_exposed_yes.get(end_dev, False) or end_had_exposed)
+
+    # Clamp to valid levels and fill missing nodes with empty sets
+    for n in trays_seen:
+        node_levels[n] = clamp_valid_levels(node_levels.get(n, set()))
+
+    # Build DataFrames
+    trays_df = pd.DataFrame(
+        [{"RunName": name, "Noise Level": levels_to_cell_value(node_levels.get(name, set()))}
+         for name in sorted(trays_seen)]
+    )
+    connections_df = pd.DataFrame(
+        [{"From": a, "To": b, "Exposed Conduit Route?": "yes" if (a, b) in exposed_edges else ""}
+         for a, b in sorted(connections)]
+    )
+
+    # Endpoints: one row per device, trays comma-separated with NO spaces
+    endpoint_rows = []
+    for dev in sorted(device_to_trays.keys()):
+        trays_list = sorted(device_to_trays[dev])
+        trays_joined = ",".join(trays_list)  # IMPORTANT: no spaces
+        endpoint_rows.append({
+            "device/panel": dev,
+            "tray/conduit(s)": trays_joined,
+            "Exposed Conduit Route?": "yes" if device_exposed_yes.get(dev, False) else "no"
+        })
+
+    endpoints_df = pd.DataFrame(endpoint_rows)
+
+    return (
+        trays_df,
+        connections_df,
+        endpoints_df,
+        node_levels,
+        connections,
+        df_cables_input_original,
+        df_routes_original,
+    )
+
+# ============================================================
 # Excel I/O helpers
 # ============================================================
 
@@ -226,7 +435,7 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
         if sh == "Tray":
             converters = {"RunName": str, "Noise Level": str}
         elif sh == "Connections":
-            converters = {"From": str, "To": str}
+            converters = {"From": str, "To": str, "Exposed Conduit Route?": str}
         elif sh == "Endpoints":
             converters = {"device/panel": str, "tray/conduit(s)": str, "Exposed": str}
         elif sh == "Cables(input)":
@@ -239,6 +448,12 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
             }
 
         dfs[sh] = pd.read_excel(xls, sh, converters=converters)
+    
+    # Ensure Connections has "Exposed Conduit Route?" column (for backwards compatibility)
+    if "Connections" in dfs:
+        if "Exposed Conduit Route?" not in dfs["Connections"].columns:
+            dfs["Connections"]["Exposed Conduit Route?"] = ""
+    
     return dfs
 
 def write_updated_workbook_bytes(dfs: dict) -> bytes:
@@ -288,6 +503,11 @@ def validate_dfs(dfs: dict) -> list[str]:
         "Endpoints": {"device/panel", "tray/conduit(s)"},
         "Cables(input)": {"Cable number", "equipfrom", "equipto", "Noise Level"},
     }
+    
+    # Ensure Connections has "Exposed Conduit Route?" column (add if missing)
+    if "Connections" in dfs and "Exposed Conduit Route?" not in dfs["Connections"].columns:
+        dfs["Connections"]["Exposed Conduit Route?"] = ""
+    
     for sh, cols in expected_cols.items():
         missing = cols - set(dfs[sh].columns)
         if missing:
@@ -328,22 +548,22 @@ def build_demo_workbook_bytes() -> bytes:
     ])
 
     connections = pd.DataFrame([
-        {"From": "LT-01", "To": "LT-02"},
-        {"From": "LT-02", "To": "LT-03"},
-        {"From": "LT-02", "To": "LT-04"},
-        {"From": "LT-03", "To": "CND-01"},
+        {"From": "LT-01", "To": "LT-02", "Exposed Conduit Route?": ""},
+        {"From": "LT-02", "To": "LT-03", "Exposed Conduit Route?": ""},
+        {"From": "LT-02", "To": "LT-04", "Exposed Conduit Route?": ""},
+        {"From": "LT-03", "To": "CND-01", "Exposed Conduit Route?": ""},
 
-        {"From": "LT-11", "To": "LT-12"},
-        {"From": "LT-12", "To": "LT-13"},
-        {"From": "LT-12", "To": "LT-14"},
-        {"From": "LT-13", "To": "CND-02"},
+        {"From": "LT-11", "To": "LT-12", "Exposed Conduit Route?": ""},
+        {"From": "LT-12", "To": "LT-13", "Exposed Conduit Route?": ""},
+        {"From": "LT-12", "To": "LT-14", "Exposed Conduit Route?": ""},
+        {"From": "LT-13", "To": "CND-02", "Exposed Conduit Route?": ""},
 
-        {"From": "CND-01", "To": "LT-20"},
-        {"From": "CND-02", "To": "LT-20"},
-        {"From": "LT-20",  "To": "CND-20"},
+        {"From": "CND-01", "To": "LT-20", "Exposed Conduit Route?": ""},
+        {"From": "CND-02", "To": "LT-20", "Exposed Conduit Route?": ""},
+        {"From": "LT-20",  "To": "CND-20", "Exposed Conduit Route?": ""},
 
-        {"From": "LT-04",  "To": "LT-20"},
-        {"From": "LT-14",  "To": "LT-20"},
+        {"From": "LT-04",  "To": "LT-20", "Exposed Conduit Route?": ""},
+        {"From": "LT-14",  "To": "LT-20", "Exposed Conduit Route?": ""},
     ])
 
     endpoints = pd.DataFrame([
@@ -767,14 +987,23 @@ def build_vis_nodes_edges(
             if key in seen:
                 continue
             seen.add(key)
-            edges.append({
+            
+            edge_data = {
                 "id": f"{a}|||{b}",
                 "from": a,
                 "to": b,
                 "title": f"{a} ↔ {b}",
                 "color": EDGE_COLOR,
                 "width": EDGE_WIDTH,
-            })
+            }
+            
+            # Add "EXP" label if exposed
+            exposed_val = r.get("Exposed Conduit Route?", "")
+            if str(exposed_val).strip().lower() == "yes":
+                edge_data["label"] = "EXP"
+                edge_data["font"] = {"size": 14, "align": "middle"}
+            
+            edges.append(edge_data)
 
     if include_probe and PROBE_ID not in node_ids:
         nodes.append({
@@ -1480,8 +1709,8 @@ if val_errors:
     for e in val_errors:
         st.write(f"- {e}")
 
-tab1, tab2, tab3, tab4, tabG, tab5 = st.tabs(
-    ["Tray", "Connections", "Endpoints", "Cables(input)", "Graph Editor", "Routing Output"]
+tab1, tab2, tab3, tab4, tabG, tab5, tab_reverse = st.tabs(
+    ["Tray", "Connections", "Endpoints", "Cables(input)", "Graph Editor", "Routing Output", "Reverse Engineer"]
 )
 
 with tab1:
@@ -1496,6 +1725,7 @@ with tab1:
 
 with tab2:
     st.subheader("Connections")
+    st.caption("The 'Exposed Conduit Route?' column allows marking edges as exposed (yes/no or blank).")
     st.session_state.connections_df = st.data_editor(
         st.session_state.connections_df,
         num_rows="dynamic",
@@ -2634,3 +2864,84 @@ with tab5:
         )
     else:
         st.info("Click **Route Now** to generate CableRoutes(output).")
+
+with tab_reverse:
+    st.subheader("Reverse Engineer from Routed Workbook")
+    st.write(
+        "Upload a routed Excel workbook (with a 'CableRoutes(output)' sheet) to reverse-engineer "
+        "and reconstruct the Tray, Connections, and Endpoints sheets."
+    )
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        re_uploaded = st.file_uploader(
+            "Upload routed workbook",
+            type="xlsx",
+            key="reverse_engineer_uploader"
+        )
+    
+    with col2:
+        st.write("")  # Align with uploader height
+        reverse_engineer_btn = st.button("Reverse Engineer", key="reverse_engineer_btn")
+    
+    if reverse_engineer_btn and re_uploaded is not None:
+        try:
+            re_file_bytes = re_uploaded.getvalue()
+            from io import BytesIO
+            
+            (
+                re_tray_df,
+                re_connections_df,
+                re_endpoints_df,
+                re_node_levels,
+                re_connections,
+                re_cables_original,
+                re_routes_original,
+            ) = reverse_engineer_from_routes(BytesIO(re_file_bytes))
+            
+            st.success("Reverse engineering complete!")
+            
+            # Display results
+            st.subheader("Reconstructed Tray")
+            st.dataframe(re_tray_df, use_container_width=True)
+            
+            st.subheader("Reconstructed Connections")
+            st.dataframe(re_connections_df, use_container_width=True)
+            
+            st.subheader("Reconstructed Endpoints")
+            st.dataframe(re_endpoints_df, use_container_width=True)
+            
+            # Create download for reconstructed workbook
+            re_output = BytesIO()
+            with pd.ExcelWriter(re_output, engine="openpyxl") as writer:
+                re_tray_df.to_excel(writer, sheet_name="Tray", index=False)
+                re_connections_df.to_excel(writer, sheet_name="Connections", index=False)
+                re_endpoints_df.to_excel(writer, sheet_name="Endpoints", index=False)
+                
+                # Add empty Cables(input) sheet if not present
+                if re_cables_original is not None:
+                    re_cables_original.to_excel(writer, sheet_name="Cables(input)", index=False)
+                else:
+                    empty_cables = pd.DataFrame(columns=["Cable number", "equipfrom", "equipto", "Noise Level", "Sort"])
+                    empty_cables.to_excel(writer, sheet_name="Cables(input)", index=False)
+                
+                # Include original CableRoutes(output) for reference
+                if re_routes_original is not None:
+                    re_routes_original.to_excel(writer, sheet_name="CableRoutes(output)", index=False)
+            
+            re_output.seek(0)
+            st.download_button(
+                "Download Reconstructed Workbook",
+                data=re_output.getvalue(),
+                file_name="reconstructed_network.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_reconstructed_btn"
+            )
+            
+        except Exception as e:
+            st.error(f"Reverse engineering failed: {e}")
+            import traceback
+            st.write(traceback.format_exc())
+    elif reverse_engineer_btn and re_uploaded is None:
+        st.warning("Please upload a file first.")
