@@ -222,7 +222,23 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
     for sh in REQUIRED_SHEETS:
         if sh not in xls.sheet_names:
             raise ValueError(f"Missing required sheet: {sh}")
-        dfs[sh] = pd.read_excel(xls, sh)
+        converters = None
+        if sh == "Tray":
+            converters = {"RunName": str, "Noise Level": str}
+        elif sh == "Connections":
+            converters = {"From": str, "To": str}
+        elif sh == "Endpoints":
+            converters = {"device/panel": str, "tray/conduit(s)": str, "Exposed": str}
+        elif sh == "Cables(input)":
+            converters = {
+                "Cable number": str,
+                "equipfrom": str,
+                "equipto": str,
+                "Noise Level": str,
+                "Sort": str,
+            }
+
+        dfs[sh] = pd.read_excel(xls, sh, converters=converters)
     return dfs
 
 def write_updated_workbook_bytes(dfs: dict) -> bytes:
@@ -276,6 +292,20 @@ def validate_dfs(dfs: dict) -> list[str]:
         missing = cols - set(dfs[sh].columns)
         if missing:
             errors.append(f"{sh}: missing columns {sorted(missing)}")
+
+    try:
+        tray_df = dfs.get("Tray")
+        con_df = dfs.get("Connections")
+        if tray_df is not None and con_df is not None and not tray_df.empty and not con_df.empty:
+            tray_names = set(tray_df["RunName"].astype(str).str.strip())
+            from_set = set(con_df["From"].astype(str).str.strip())
+            to_set = set(con_df["To"].astype(str).str.strip())
+            missing_nodes = sorted(n for n in (from_set | to_set) if n and n not in tray_names)
+            if missing_nodes:
+                errors.append("Connections: missing Tray.RunName entries for " + ", ".join(missing_nodes))
+    except Exception:
+        pass
+
     return errors
 
 def build_demo_workbook_bytes() -> bytes:
