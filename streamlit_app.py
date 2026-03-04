@@ -259,14 +259,12 @@ def clamp_valid_levels(levels: set) -> set:
 def levels_to_cell_value(levels: set):
     """
     Convert a set to what the Tray sheet expects:
-    - {1} -> 1
+    - {1} -> "1"
     - {1,2} -> "1,2"
     - empty -> ""
     """
     if not levels:
         return ""
-    if len(levels) == 1:
-        return next(iter(levels))
     return ",".join(str(x) for x in sorted(levels))
 
 def reverse_engineer_from_routes(xlsx_path: str):
