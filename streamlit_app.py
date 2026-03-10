@@ -1063,7 +1063,7 @@ def build_vis_nodes_edges(
         except Exception:
             x = None
         try:
-            y = None if pd.isna(y) else float(y)
+            y = None if pd.isna(y) else -float(y)  # Negate Y so increasing Y moves nodes up
         except Exception:
             y = None
         if x is not None and y is not None:
@@ -1150,7 +1150,7 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
 
         try:
             x = float(x)
-            y = float(y)
+            y = -float(y)  # Negate Y when saving back
         except Exception:
             continue
 
@@ -1189,7 +1189,7 @@ def apply_offset_to_nodes(tray_df: pd.DataFrame, node_names: list[str], dx: floa
                 except Exception:
                     y = 0.0
                 
-                # Apply offset
+                # Apply offset (negate dy so positive values move up)
                 tray_df.loc[idx, "X"] = x + dx
                 tray_df.loc[idx, "Y"] = y + dy
     
@@ -1982,7 +1982,6 @@ with tab4:
     )
 
 with tabG:
-    st.subheader("Graph Editor")
 
     graph_col, tools_col = st.columns([3, 1], gap="large")
 
