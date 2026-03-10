@@ -1487,6 +1487,43 @@ def df_duplicate_node(tray_df, source_name: str, new_name: str):
     df = pd.concat([df, pd.DataFrame([src_row])], ignore_index=True)
     return df
 
+def df_duplicate_nodes(tray_df: pd.DataFrame, source_names: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Duplicate multiple nodes by adding _COPY suffix to each name. Returns updated df and list of new names."""
+    df = ensure_xy_columns(tray_df.copy())
+    new_names = []
+    
+    for source_name in source_names:
+        source_name = str(source_name).strip()
+        if not source_name:
+            continue
+        
+        # Generate new name with _COPY suffix
+        new_name = f"{source_name}_COPY"
+        counter = 1
+        while (df["RunName"].astype(str).str.strip() == new_name).any():
+            new_name = f"{source_name}_COPY_{counter}"
+            counter += 1
+        
+        src_mask = df["RunName"].astype(str).str.strip() == source_name
+        if not src_mask.any():
+            continue
+        
+        src_row = df[src_mask].iloc[0].to_dict()
+        src_row["RunName"] = new_name
+        
+        try:
+            if not pd.isna(src_row.get("X")):
+                src_row["X"] = float(src_row["X"]) + 50.0
+            if not pd.isna(src_row.get("Y")):
+                src_row["Y"] = float(src_row["Y"]) + 50.0
+        except Exception:
+            pass
+        
+        df = pd.concat([df, pd.DataFrame([src_row])], ignore_index=True)
+        new_names.append(new_name)
+    
+    return df, new_names
+
 def df_set_node_noise_level(tray_df: pd.DataFrame, node: str, noise_level_text: str) -> tuple[pd.DataFrame, bool]:
     node = str(node).strip()
     df = tray_df.copy()
@@ -1692,8 +1729,14 @@ def validate_manual_route_steps(connections_df: pd.DataFrame, nodes: list[str]) 
 # Streamlit UI
 # ============================================================
 
-st.set_page_config(page_title="Cable Routing Webapp (Streamlit)", layout="wide")
-st.title("Cable Routing Webapp (Streamlit)")
+st.set_page_config(page_title="Cable Routing Webapp", layout="wide")
+
+st.markdown(
+    "<style>div.block-container {padding-top: 1rem;}</style>",
+    unsafe_allow_html=True,
+)
+
+st.title("Cable Routing Webapp")
 
 st.sidebar.header("Workbook")
 
@@ -1940,10 +1983,6 @@ with tab4:
 
 with tabG:
     st.subheader("Graph Editor")
-    st.caption(
-        "If the workbook loads with blank X/Y, the app will automatically lock in the FIRST layout once. "
-        "After that, positions only change when you click **Save current node positions to Tray (X/Y)**."
-    )
 
     graph_col, tools_col = st.columns([3, 1], gap="large")
 
@@ -2002,7 +2041,7 @@ with tabG:
                             "enabled": True,
                             "iterations": 1600,
                             "updateInterval": 50,
-                            "fit": True,
+                            "fit": False,
                         },
                         "solver": "forceAtlas2Based",
                         "forceAtlas2Based": {
@@ -2025,9 +2064,12 @@ with tabG:
                         "hover": True,
                         "multiselect": True,
                         "selectConnectedEdges": True,
+                        "navigationButtons": False,
+                        "keyboard": False,
                     },
                     "nodes": {"font": {"vadjust": 0}},
                     "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
+                    "animation": {"duration": 0},
                 }
             else:
                 options = {
@@ -2040,9 +2082,12 @@ with tabG:
                         "hover": True,
                         "multiselect": True,
                         "selectConnectedEdges": True,
+                        "navigationButtons": False,
+                        "keyboard": False,
                     },
                     "nodes": {"font": {"vadjust": 0}},
                     "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
+                    "animation": {"duration": 0},
                 }
 
             selection = streamlit_vis_network(
@@ -2194,7 +2239,89 @@ with tabG:
                 
                 st.divider()
 
-            if sel_nodes2:
+            if len(sel_nodes2) > 1:
+                # Multiple nodes selected - show only multi-node operations
+                st.markdown("**Multiple Nodes Selected**")
+                
+                # Check if all selected nodes have the same noise level
+                noise_levels = []
+                for node_name in sel_nodes2:
+                    node_name = str(node_name).strip()
+                    tdf = st.session_state.tray_df
+                    row = tdf[tdf["RunName"].astype(str).str.strip() == node_name]
+                    if not row.empty:
+                        nl = str(row.iloc[0].get("Noise Level", "")).strip()
+                        noise_levels.append(nl)
+                
+                # Only show noise level editing if all have the same level
+                if noise_levels and all(nl == noise_levels[0] for nl in noise_levels):
+                    st.markdown("**Edit Noise Level (All Selected)**")
+                    st.caption("All selected nodes have the same noise level.")
+                    
+                    preset_map = {
+                        "": "(leave as-is)",
+                        "1": "1",
+                        "2": "2",
+                        "1,2": "1,2",
+                        "2,1": "2,1",
+                        "3": "3",
+                        "4": "4",
+                        "3,4": "3,4",
+                        "4,3": "4,3",
+                    }
+                    presets = list(preset_map.keys())
+                    
+                    current_text = str(noise_levels[0] or "").strip()
+                    preset_index = 0
+                    if current_text in presets:
+                        preset_index = presets.index(current_text)
+                    
+                    nl_preset_sel = st.selectbox(
+                        "Preset",
+                        options=presets,
+                        index=preset_index,
+                        key="multi_noise_preset",
+                        format_func=lambda x: preset_map.get(x, x),
+                    )
+                    
+                    nl_custom_sel = st.text_input(
+                        "Custom (optional: overrides preset if non-empty)",
+                        value="",
+                        key="multi_noise_custom",
+                        placeholder="e.g. 1 or 2 or 1,2",
+                    )
+                    
+                    if st.button("Apply noise level to all", key="apply_multi_noise_btn", width="stretch"):
+                        new_text = (nl_custom_sel or "").strip() if (nl_custom_sel or "").strip() else str(nl_preset_sel or "").strip()
+                        if new_text == "(leave as-is)":
+                            new_text = current_text
+                        
+                        success_count = 0
+                        for node_name in sel_nodes2:
+                            node_name = str(node_name).strip()
+                            new_df, ok = df_set_node_noise_level(st.session_state.tray_df, node_name, new_text)
+                            if ok:
+                                st.session_state.tray_df = ensure_xy_columns(new_df)
+                                success_count += 1
+                        
+                        if success_count > 0:
+                            st.session_state.routes_df = None
+                            st.success(f"Updated noise level for {success_count} nodes to: {new_text if new_text else '(blank)'}")
+                            st.session_state.graph_key_v += 1
+                            st.rerun()
+                    
+                    st.divider()
+                
+                # Duplicate group
+                if st.button("Duplicate selected group", key="dup_group_btn", width="stretch"):
+                    new_df, new_names = df_duplicate_nodes(st.session_state.tray_df, sel_nodes2)
+                    st.session_state.tray_df = ensure_xy_columns(new_df)
+                    st.session_state.routes_df = None
+                    st.success(f"Duplicated {len(sel_nodes2)} nodes. New names: {', '.join(new_names)}")
+                    st.session_state.graph_key_v += 1
+                    st.rerun()
+
+            elif sel_nodes2:
                 node_id = str(sel_nodes2[0]).strip()
                 tdf = st.session_state.tray_df
                 row = tdf[tdf["RunName"].astype(str).str.strip() == node_id]
@@ -3032,6 +3159,15 @@ with tabG:
 
                 st.success("Cleared Tray.X and Tray.Y (next render will lock in a fresh initial layout once).")
                 st.rerun()
+
+    st.divider()
+    st.caption(
+        "If the workbook loads with blank X/Y, the app will automatically lock in the FIRST layout once. "
+        "After that, positions only change when you click **Save current node positions to Tray (X/Y)**."
+    )
+    st.caption(
+        "**Multi-select:** Hold **Shift** and left-click drag to select multiple nodes together."
+    )
 
 with tab5:
     st.subheader("Route cables")
