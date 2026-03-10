@@ -7,6 +7,7 @@ import urllib.parse
 
 from streamlit_vis_network import streamlit_vis_network
 
+#To run locally: python -m streamlit run .\streamlit_app.py
 
 # ============================================================
 # Core Routing (Version A logic, refactored to use DataFrames)
@@ -758,6 +759,8 @@ def noise_title(run_name: str, noise_val) -> str:
 
 def infer_type_from_name(name: str) -> str:
     s = str(name).upper()
+    if "EP" in s:
+        return "Manhole"
     if "CND" in s:
         return "Conduit"
     if "LT" in s:
@@ -825,6 +828,93 @@ def split_circle_svg(d: int, left_color: str, right_color: str, border: str = NO
         <rect x="{right_x}" y="0" width="{right_w}" height="{d}" fill="{right_color}"/>
       </g>
       <circle cx="{r}" cy="{r}" r="{rr}" fill="none" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+    </svg>
+    """.strip()
+
+def solid_diamond_svg(size: int, color: str, border: str = NODE_BORDER_COLOR) -> str:
+    # Manhole cover: circle with lugs
+    center = size / 2
+    outer_r = size * 0.40
+    lug_size = size * 0.25
+    gap = 2
+    
+    return f"""
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">
+      <defs>
+        <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+          <feDropShadow dx="1" dy="1" stdDeviation="1" flood-opacity="0.4"/>
+        </filter>
+      </defs>
+      
+      <!-- Lugs (square handles) with shadow -->
+      <rect x="{center - lug_size/2}" y="{gap}" width="{lug_size}" height="{lug_size}" fill="{color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}" filter="url(#shadow)"/>
+      <rect x="{center - lug_size/2}" y="{size - lug_size - gap}" width="{lug_size}" height="{lug_size}" fill="{color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}" filter="url(#shadow)"/>
+      <rect x="{gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size}" fill="{color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}" filter="url(#shadow)"/>
+      <rect x="{size - lug_size - gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size}" fill="{color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}" filter="url(#shadow)"/>
+      
+      <!-- Central circle -->
+      <circle cx="{center}" cy="{center}" r="{outer_r}" fill="{color}"/>
+      <circle cx="{center}" cy="{center}" r="{outer_r}" fill="none" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+    </svg>
+    """.strip()
+
+def split_diamond_svg(size: int, left_color: str, right_color: str, border: str = NODE_BORDER_COLOR) -> str:
+    # Manhole cover: circle with lugs (split colors)
+    center = size / 2
+    outer_r = size * 0.40
+    lug_size = size * 0.25
+    gap = 2
+    
+    return f"""
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">
+      <defs>
+        <filter id="shadowSplit" x="-50%" y="-50%" width="200%" height="200%">
+          <feDropShadow dx="1" dy="1" stdDeviation="1" flood-opacity="0.4"/>
+        </filter>
+        <clipPath id="clipLugTop">
+          <rect x="{center - lug_size/2}" y="{gap}" width="{lug_size}" height="{lug_size}"/>
+        </clipPath>
+        <clipPath id="clipLugBottom">
+          <rect x="{center - lug_size/2}" y="{size - lug_size - gap}" width="{lug_size}" height="{lug_size}"/>
+        </clipPath>
+        <clipPath id="clipLugLeft">
+          <rect x="{gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size}"/>
+        </clipPath>
+        <clipPath id="clipLugRight">
+          <rect x="{size - lug_size - gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size}"/>
+        </clipPath>
+      </defs>
+      
+      <!-- Lugs with split colors -->
+      <g clip-path="url(#clipLugTop)" filter="url(#shadowSplit)">
+        <rect x="{center - lug_size/2}" y="{gap}" width="{lug_size/2}" height="{lug_size}" fill="{left_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+        <rect x="{center}" y="{gap}" width="{lug_size/2}" height="{lug_size}" fill="{right_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+      </g>
+      <g clip-path="url(#clipLugBottom)" filter="url(#shadowSplit)">
+        <rect x="{center - lug_size/2}" y="{size - lug_size - gap}" width="{lug_size/2}" height="{lug_size}" fill="{left_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+        <rect x="{center}" y="{size - lug_size - gap}" width="{lug_size/2}" height="{lug_size}" fill="{right_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+      </g>
+      <g clip-path="url(#clipLugLeft)" filter="url(#shadowSplit)">
+        <rect x="{gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size/2}" fill="{left_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+        <rect x="{gap}" y="{center}" width="{lug_size}" height="{lug_size/2}" fill="{right_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+      </g>
+      <g clip-path="url(#clipLugRight)" filter="url(#shadowSplit)">
+        <rect x="{size - lug_size - gap}" y="{center - lug_size/2}" width="{lug_size}" height="{lug_size/2}" fill="{left_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+        <rect x="{size - lug_size - gap}" y="{center}" width="{lug_size}" height="{lug_size/2}" fill="{right_color}" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
+      </g>
+      
+      <!-- Central circle with split colors -->
+      <defs>
+        <clipPath id="clipCircleLeft">
+          <rect x="0" y="0" width="{center}" height="{size}"/>
+        </clipPath>
+        <clipPath id="clipCircleRight">
+          <rect x="{center}" y="0" width="{center}" height="{size}"/>
+        </clipPath>
+      </defs>
+      <circle cx="{center}" cy="{center}" r="{outer_r}" fill="{left_color}" clip-path="url(#clipCircleLeft)"/>
+      <circle cx="{center}" cy="{center}" r="{outer_r}" fill="{right_color}" clip-path="url(#clipCircleRight)"/>
+      <circle cx="{center}" cy="{center}" r="{outer_r}" fill="none" stroke="{border}" stroke-width="{SVG_BORDER_WIDTH}"/>
     </svg>
     """.strip()
 
@@ -919,6 +1009,18 @@ def build_vis_nodes_edges(
                 svg = split_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, ORANGE, GREEN, NODE_BORDER_COLOR)
             else:
                 svg = solid_rounded_square_svg(TRAY_SIDE, TRAY_RADIUS, GRAY, NODE_BORDER_COLOR)
+        elif ntype == "Manhole":
+            d = 70
+            if kind == "nl1":
+                svg = solid_diamond_svg(d, ORANGE, NODE_BORDER_COLOR)
+            elif kind == "nl2":
+                svg = solid_diamond_svg(d, GREEN, NODE_BORDER_COLOR)
+            elif kind == "nl34":
+                svg = solid_diamond_svg(d, YELLOW, NODE_BORDER_COLOR)
+            elif kind == "mixed12":
+                svg = split_diamond_svg(d, ORANGE, GREEN, NODE_BORDER_COLOR)
+            else:
+                svg = solid_diamond_svg(d, GRAY, NODE_BORDER_COLOR)
         else:
             d = 80
             if kind == "nl1":
