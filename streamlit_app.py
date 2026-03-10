@@ -1162,6 +1162,40 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
     return tray_df
 
 
+def apply_offset_to_nodes(tray_df: pd.DataFrame, node_names: list[str], dx: float, dy: float) -> pd.DataFrame:
+    """Offset specified nodes by dx, dy. Creates X/Y columns if missing."""
+    tray_df = ensure_xy_columns(tray_df)
+    tray_df = tray_df.copy()
+    rn_series = tray_df["RunName"].astype(str).str.strip()
+    
+    for node_name in node_names:
+        node_name = str(node_name).strip()
+        if not node_name or node_name == PROBE_ID:
+            continue
+        
+        mask = rn_series == node_name
+        if mask.any():
+            for idx in tray_df[mask].index:
+                x_val = tray_df.loc[idx, "X"]
+                y_val = tray_df.loc[idx, "Y"]
+                
+                # Convert to float, treating NaN as 0
+                try:
+                    x = float(x_val) if pd.notna(x_val) else 0.0
+                except Exception:
+                    x = 0.0
+                try:
+                    y = float(y_val) if pd.notna(y_val) else 0.0
+                except Exception:
+                    y = 0.0
+                
+                # Apply offset
+                tray_df.loc[idx, "X"] = x + dx
+                tray_df.loc[idx, "Y"] = y + dy
+    
+    return tray_df
+
+
 # ============================================================
 # UNSAVED LAYOUT REMINDER helpers
 # ============================================================
@@ -1734,6 +1768,11 @@ st.session_state.setdefault("save_positions_notice", None)  # ("success"/"warnin
 # Track graph interactions so we can CLEAR the notice when user clicks/drags/changes graph
 st.session_state.setdefault("graph_interaction_sig", None)
 
+# Multi-node offset feature
+st.session_state.setdefault("multi_node_offset_enabled", False)
+st.session_state.setdefault("multi_node_offset_dx", 0.0)
+st.session_state.setdefault("multi_node_offset_dy", 0.0)
+
 GRAPH_HEIGHT = 740
 
 st.markdown(
@@ -1984,7 +2023,7 @@ with tabG:
                         "dragView": True,
                         "zoomView": True,
                         "hover": True,
-                        "multiselect": False,
+                        "multiselect": True,
                         "selectConnectedEdges": True,
                     },
                     "nodes": {"font": {"vadjust": 0}},
@@ -1999,7 +2038,7 @@ with tabG:
                         "dragView": True,
                         "zoomView": True,
                         "hover": True,
-                        "multiselect": False,
+                        "multiselect": True,
                         "selectConnectedEdges": True,
                     },
                     "nodes": {"font": {"vadjust": 0}},
@@ -2129,6 +2168,31 @@ with tabG:
 
             sel_nodes2 = st.session_state.sel_nodes or []
             sel_edges2 = st.session_state.sel_edges or []
+
+            # Multi-node offset feature
+            if len(sel_nodes2) > 1:
+                st.markdown("**Move Multiple Nodes**")
+                st.caption(f"{len(sel_nodes2)} nodes selected")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    dx = st.number_input("Offset X", value=0.0, step=10.0, key="multi_offset_dx")
+                with col2:
+                    dy = st.number_input("Offset Y", value=0.0, step=10.0, key="multi_offset_dy")
+                
+                if st.button("Apply offset to selected", key="apply_offset_btn", width="stretch"):
+                    st.session_state.tray_df = apply_offset_to_nodes(
+                        st.session_state.tray_df,
+                        sel_nodes2,
+                        float(dx),
+                        float(dy)
+                    )
+                    st.session_state.layout_unsaved_hint = True
+                    st.session_state.graph_key_v += 1
+                    st.success(f"Offset applied! Moved {len(sel_nodes2)} nodes by ({dx}, {dy})")
+                    st.rerun()
+                
+                st.divider()
 
             if sel_nodes2:
                 node_id = str(sel_nodes2[0]).strip()
