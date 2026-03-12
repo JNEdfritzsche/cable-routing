@@ -1939,7 +1939,7 @@ if val_errors:
         st.write(f"- {e}")
 
 tab1, tab2, tab3, tab4, tabG, tab5, tab_reverse = st.tabs(
-    ["Tray", "Connections", "Endpoints", "Cables(input)", "Graph Editor", "Routing Output", "Reverse Engineer"]
+    ["📦 Tray", "🔗 Connections", "🎯 Endpoints", "🧵 Cables(input)", "🗺️ Graph Editor", "🧾 Routing Output", "🔁 Reverse Engineer"]
 )
 
 with tab1:
