@@ -2199,9 +2199,13 @@ with tabG:
                 st.rerun()
 
     with tools_col:
-        tools_box = st.container(height=GRAPH_HEIGHT+70, border=False)
+        # Save button (OUTSIDE scrollable container - stays visible when scrolling)
+        save_clicked = st.button("💾 Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch")
+        save_notice_slot = st.empty()
+        
+        # Scrollable tools container
+        tools_box = st.container(height=GRAPH_HEIGHT, border=False)
         with tools_box:
-
             if st.session_state.layout_unsaved_hint and (not st.session_state.layout_opt_active):
                 st.warning(
                     "You have **unsaved node position changes**.\n\n"
@@ -3116,12 +3120,8 @@ with tabG:
             # shows the saved layout immediately (no “stale view”).
             # Also reset graph_interaction_sig to avoid auto-clearing
             # the success message on that forced refresh.
-            # ------------------------------------------------------------
-            save_clicked = st.button("Save current node positions to Tray (X/Y)", key="save_positions_btn", width="stretch")
-
-            # Placeholder is DEFINITELY below the button
-            save_notice_slot = st.empty()
-
+            # (Note: save_clicked and save_notice_slot are now defined at top of tools_box)
+            # Save button click handler (defined at top of tools_box, logic here)
             if save_clicked:
                 pos = None
                 sn = se = None
