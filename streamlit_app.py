@@ -1063,7 +1063,7 @@ def build_vis_nodes_edges(
         except Exception:
             x = None
         try:
-            y = None if pd.isna(y) else -float(y)  # Negate Y so increasing Y moves nodes up
+            y = None if pd.isna(y) else float(y)  # Negate Y so increasing Y moves nodes up
         except Exception:
             y = None
         if x is not None and y is not None:
@@ -1150,7 +1150,7 @@ def apply_positions_to_tray(tray_df: pd.DataFrame, positions: dict) -> pd.DataFr
 
         try:
             x = float(x)
-            y = -float(y)  # Negate Y when saving back
+            y = float(y)  # Negate Y when saving back
         except Exception:
             continue
 
@@ -2222,7 +2222,7 @@ with tabG:
                 with col1:
                     dx = st.number_input("Offset X", value=0.0, step=10.0, key="multi_offset_dx")
                 with col2:
-                    dy = st.number_input("Offset Y", value=0.0, step=10.0, key="multi_offset_dy")
+                    dy = -st.number_input("Offset Y", value=0.0, step=10.0, key="multi_offset_dy")
                 
                 if st.button("Apply offset to selected", key="apply_offset_btn", width="stretch"):
                     st.session_state.tray_df = apply_offset_to_nodes(
