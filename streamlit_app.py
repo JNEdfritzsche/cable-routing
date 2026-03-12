@@ -1816,7 +1816,7 @@ st.session_state.setdefault("multi_node_offset_enabled", False)
 st.session_state.setdefault("multi_node_offset_dx", 0.0)
 st.session_state.setdefault("multi_node_offset_dy", 0.0)
 
-GRAPH_HEIGHT = 740
+GRAPH_HEIGHT = 750
 
 st.markdown(
     """
@@ -2010,7 +2010,7 @@ with tabG:
     this_run_sig = None
 
     with graph_col:
-        graph_box = st.container(border=True)
+        graph_box = st.container(border=False)
         with graph_box:
             st.markdown('<div class="graphwrap">', unsafe_allow_html=True)
 
@@ -2199,7 +2199,7 @@ with tabG:
                 st.rerun()
 
     with tools_col:
-        tools_box = st.container(height=GRAPH_HEIGHT, border=True)
+        tools_box = st.container(height=GRAPH_HEIGHT+70, border=False)
         with tools_box:
 
             if st.session_state.layout_unsaved_hint and (not st.session_state.layout_opt_active):
