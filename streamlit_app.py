@@ -2213,8 +2213,43 @@ with tabG:
             sel_nodes2 = st.session_state.sel_nodes or []
             sel_edges2 = st.session_state.sel_edges or []
 
-            # Multi-node offset feature
+            # Multi-node operations
             if len(sel_nodes2) > 1:
+                # Connect all selected nodes (FIRST)
+                st.markdown("**Connect All Selected Nodes**")
+                st.caption(f"Create connections between all {len(sel_nodes2)} selected nodes")
+                
+                if st.button("Connect all selected nodes", key="connect_all_nodes_btn", width="stretch"):
+                    connections_added = 0
+                    connections_already_exist = 0
+                    
+                    # Create connections between all pairs of selected nodes
+                    for i, node1 in enumerate(sel_nodes2):
+                        for node2 in sel_nodes2[i+1:]:
+                            new_con, added = df_add_edge(st.session_state.connections_df, node1, node2)
+                            if added:
+                                st.session_state.connections_df = new_con
+                                connections_added += 1
+                            else:
+                                connections_already_exist += 1
+                    
+                    st.session_state.routes_df = None
+                    
+                    if connections_added > 0:
+                        message = f"Added {connections_added} new connection{'s' if connections_added != 1 else ''}"
+                        if connections_already_exist > 0:
+                            message += f" ({connections_already_exist} already existed)"
+                        st.success(message)
+                        st.session_state.graph_key_v += 1
+                        st.rerun()
+                    elif connections_already_exist > 0:
+                        st.info(f"All {connections_already_exist} possible connections already exist.")
+                    else:
+                        st.warning("Could not add any connections.")
+                
+                st.divider()
+                
+                # Move Multiple Nodes
                 st.markdown("**Move Multiple Nodes**")
                 st.caption(f"{len(sel_nodes2)} nodes selected")
                 
@@ -2237,13 +2272,10 @@ with tabG:
                     st.rerun()
                 
                 st.divider()
-
-            if len(sel_nodes2) > 1:
-                # Multiple nodes selected - show only multi-node operations
-                st.markdown("**Multiple Nodes Selected**")
                 
-                # Check if all selected nodes have the same noise level
+                # Get noise levels for all selected nodes
                 noise_levels = []
+                node_noise_map = {}
                 for node_name in sel_nodes2:
                     node_name = str(node_name).strip()
                     tdf = st.session_state.tray_df
@@ -2251,65 +2283,74 @@ with tabG:
                     if not row.empty:
                         nl = str(row.iloc[0].get("Noise Level", "")).strip()
                         noise_levels.append(nl)
+                        node_noise_map[node_name] = nl
                 
-                # Only show noise level editing if all have the same level
-                if noise_levels and all(nl == noise_levels[0] for nl in noise_levels):
-                    st.markdown("**Edit Noise Level (All Selected)**")
+                # Always show noise level editing (regardless of whether levels match)
+                st.markdown("**Edit Noise Level (All Selected)**")
+                all_same = noise_levels and all(nl == noise_levels[0] for nl in noise_levels)
+                if all_same:
                     st.caption("All selected nodes have the same noise level.")
-                    
-                    preset_map = {
-                        "": "(leave as-is)",
-                        "1": "1",
-                        "2": "2",
-                        "1,2": "1,2",
-                        "2,1": "2,1",
-                        "3": "3",
-                        "4": "4",
-                        "3,4": "3,4",
-                        "4,3": "4,3",
-                    }
-                    presets = list(preset_map.keys())
-                    
-                    current_text = str(noise_levels[0] or "").strip()
-                    preset_index = 0
-                    if current_text in presets:
-                        preset_index = presets.index(current_text)
-                    
-                    nl_preset_sel = st.selectbox(
-                        "Preset",
-                        options=presets,
-                        index=preset_index,
-                        key="multi_noise_preset",
-                        format_func=lambda x: preset_map.get(x, x),
-                    )
-                    
-                    nl_custom_sel = st.text_input(
-                        "Custom (optional: overrides preset if non-empty)",
-                        value="",
-                        key="multi_noise_custom",
-                        placeholder="e.g. 1 or 2 or 1,2",
-                    )
-                    
-                    if st.button("Apply noise level to all", key="apply_multi_noise_btn", width="stretch"):
-                        new_text = (nl_custom_sel or "").strip() if (nl_custom_sel or "").strip() else str(nl_preset_sel or "").strip()
-                        if new_text == "(leave as-is)":
-                            new_text = current_text
-                        
-                        success_count = 0
+                else:
+                    st.caption("Selected nodes have different noise levels.")
+                    with st.expander("Show current noise levels", expanded=False):
                         for node_name in sel_nodes2:
-                            node_name = str(node_name).strip()
-                            new_df, ok = df_set_node_noise_level(st.session_state.tray_df, node_name, new_text)
-                            if ok:
-                                st.session_state.tray_df = ensure_xy_columns(new_df)
-                                success_count += 1
-                        
-                        if success_count > 0:
-                            st.session_state.routes_df = None
-                            st.success(f"Updated noise level for {success_count} nodes to: {new_text if new_text else '(blank)'}")
-                            st.session_state.graph_key_v += 1
-                            st.rerun()
+                            current_nl = node_noise_map.get(node_name, "(unknown)")
+                            st.write(f"• {node_name}: {current_nl if current_nl else '(blank)'}")
+                
+                preset_map = {
+                    "": "(leave as-is)",
+                    "1": "1",
+                    "2": "2",
+                    "1,2": "1,2",
+                    "2,1": "2,1",
+                    "3": "3",
+                    "4": "4",
+                    "3,4": "3,4",
+                    "4,3": "4,3",
+                }
+                presets = list(preset_map.keys())
+                
+                # Set default preset index based on first node's level
+                current_text = str(noise_levels[0] or "").strip() if noise_levels else ""
+                preset_index = 0
+                if current_text in presets:
+                    preset_index = presets.index(current_text)
+                
+                nl_preset_sel = st.selectbox(
+                    "Preset",
+                    options=presets,
+                    index=preset_index,
+                    key="multi_noise_preset",
+                    format_func=lambda x: preset_map.get(x, x),
+                )
+                
+                nl_custom_sel = st.text_input(
+                    "Custom (optional: overrides preset if non-empty)",
+                    value="",
+                    key="multi_noise_custom",
+                    placeholder="e.g. 1 or 2 or 1,2",
+                )
+                
+                if st.button("Apply noise level to all", key="apply_multi_noise_btn", width="stretch"):
+                    new_text = (nl_custom_sel or "").strip() if (nl_custom_sel or "").strip() else str(nl_preset_sel or "").strip()
+                    if new_text == "(leave as-is)":
+                        new_text = current_text
                     
-                    st.divider()
+                    success_count = 0
+                    for node_name in sel_nodes2:
+                        node_name = str(node_name).strip()
+                        new_df, ok = df_set_node_noise_level(st.session_state.tray_df, node_name, new_text)
+                        if ok:
+                            st.session_state.tray_df = ensure_xy_columns(new_df)
+                            success_count += 1
+                    
+                    if success_count > 0:
+                        st.session_state.routes_df = None
+                        st.success(f"Updated noise level for {success_count} nodes to: {new_text if new_text else '(blank)'}")
+                        st.session_state.graph_key_v += 1
+                        st.rerun()
+                
+                st.divider()
                 
                 # Duplicate group
                 if st.button("Duplicate selected group", key="dup_group_btn", width="stretch"):
