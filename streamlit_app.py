@@ -2068,7 +2068,7 @@ with tabG:
                     },
                     "nodes": {"font": {"vadjust": 0}},
                     "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
-                    "animation": {"duration": 0},
+                    # "animation": {"duration": 0},
                 }
             else:
                 options = {
@@ -2086,7 +2086,7 @@ with tabG:
                     },
                     "nodes": {"font": {"vadjust": 0}},
                     "edges": {"smooth": False, "color": EDGE_COLOR, "width": EDGE_WIDTH},
-                    "animation": {"duration": 0},
+                    # "animation": {"duration": 0},
                 }
 
             selection = streamlit_vis_network(
