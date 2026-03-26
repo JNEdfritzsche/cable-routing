@@ -2382,7 +2382,8 @@ with tabG:
                     y_val = row.iloc[0].get("Y", pd.NA)
 
                 st.markdown("**Selected Node**")
-                st.write(f"**Name:** {node_id}")
+                st.markdown("**Name:**")
+                st.code(node_id, language=None)
                 st.write(f"**Type:** {infer_type_from_name(node_id)}")
                 st.write(f"**Noise Level:** {noise_val if str(noise_val).strip() else 'N/A'}")
                 st.write(f"**X:** {'' if pd.isna(x_val) else x_val}")
