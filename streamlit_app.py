@@ -169,53 +169,58 @@ class CableNetwork:
         for cable in cables:
             nl = cable["noise_level"]
 
-            start_trays = [t for t in self.endpoints.get(cable["start"], [])
-                           if nl in self.noise_levels.get(t, set())]
-            end_trays = [t for t in self.endpoints.get(cable["end"], [])
-                         if nl in self.noise_levels.get(t, set())]
-
-            if not start_trays and not end_trays:
-                path_result = "Error: No endpoints with matching noise level (start & end)"
-            elif not start_trays:
-                path_result = "Error: No start endpoint with matching noise level"
-            elif not end_trays:
-                path_result = "Error: No end endpoint with matching noise level"
+            # Special case: route is internal if source and destination are the same
+            if cable["start"] == cable["end"]:
+                path_result = "INTERNAL"
             else:
-                path = self.find_route(start_trays, set(end_trays), nl)
-                if path:
-                    suffix = ""
-                    if nl == 1:
-                        suffix = "(T6)"
-                    elif nl == 2:
-                        suffix = "(T4)"
+                start_trays = [t for t in self.endpoints.get(cable["start"], [])
+                               if nl in self.noise_levels.get(t, set())]
+                end_trays = [t for t in self.endpoints.get(cable["end"], [])
+                             if nl in self.noise_levels.get(t, set())]
 
-                    def format_node(node):
-                        node = str(node)
-                        if "LT" in node:
-                            return f"{node}{suffix}"
-                        if "CND" in node:
-                            return node
-                        return node
-
-                    parts = [format_node(p) for p in path]
-
-                    FROM_exposed = self.endpoint_exposed.get(cable["start"], False)
-                    TO_exposed = self.endpoint_exposed.get(cable["end"], False)
-                    
-                    # Check for exposed edges along the path
-                    for i in range(len(path) - 1):
-                        edge_key = tuple(sorted([path[i], path[i+1]]))
-                        if self.edge_exposed.get(edge_key, False):
-                            parts[i+1] = "EXPOSED CONDUIT ROUTE," + parts[i+1]
-
-                    if FROM_exposed:
-                        parts.insert(0, "EXPOSED CONDUIT ROUTE")
-                    if TO_exposed:
-                        parts.append("EXPOSED CONDUIT ROUTE")
-
-                    path_result = ",".join(parts)
+                if not start_trays and not end_trays:
+                    path_result = "Error: No endpoints with matching noise level (start & end)"
+                elif not start_trays:
+                    path_result = "Error: No start endpoint with matching noise level"
+                elif not end_trays:
+                    path_result = "Error: No end endpoint with matching noise level"
                 else:
-                    path_result = "No valid route"
+                    path = self.find_route(start_trays, set(end_trays), nl)
+                    if path:
+                        suffix = ""
+                        if nl == 1:
+                            suffix = "(T6)"
+                        elif nl == 2:
+                            suffix = "(T4)"
+
+                        def format_node(node):
+                            node = str(node)
+                            if "LT" in node:
+                                return f"{node}{suffix}"
+                            if "CND" in node:
+                                return node
+                            return node
+
+                        parts = [format_node(p) for p in path]
+
+                        FROM_exposed = self.endpoint_exposed.get(cable["start"], False)
+                        TO_exposed = self.endpoint_exposed.get(cable["end"], False)
+                        
+                        # Check for exposed edges along the path
+                        for i in range(len(path) - 1):
+                            edge_key = tuple(sorted([path[i], path[i+1]]))
+                            if self.edge_exposed.get(edge_key, False):
+                                parts[i+1] = "EXPOSED CONDUIT ROUTE," + parts[i+1]
+
+                        if FROM_exposed:
+                            parts.insert(0, "EXPOSED CONDUIT ROUTE")
+                        if TO_exposed:
+                            parts.append("EXPOSED CONDUIT ROUTE")
+
+                        path_result = ",".join(parts)
+                    else:
+                        path_result = "No valid route"
+
 
             results.append({
                 "Sort": cable["sort"],
@@ -2740,7 +2745,7 @@ with tabG:
 
             st.divider()
 
-            st.markdown("### Delete node (autocomplete)")
+            st.markdown("### Delete node")
 
             del_pick = st.selectbox("Node to delete (type to search)", options=[""] + node_names, index=0, key="delete_node_pick")
             if st.button("Delete selected node", width="stretch", key="delete_node_autofill_btn"):
