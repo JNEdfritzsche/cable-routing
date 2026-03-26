@@ -3217,26 +3217,10 @@ with tabG:
 
 with tab5:
     st.subheader("Route cables")
-    colA, colB, colC = st.columns([1, 1, 2])
+    colA, colB = st.columns([1, 1])
 
     with colA:
-        if st.button("Validate", key="validate_btn"):
-            dfs_for_validate = {
-                "Tray": st.session_state.tray_df,
-                "Connections": st.session_state.connections_df,
-                "Endpoints": st.session_state.endpoints_df,
-                "Cables(input)": st.session_state.cables_df,
-            }
-            errs = validate_dfs(dfs_for_validate)
-            if errs:
-                st.error("Validation issues found:")
-                for e in errs:
-                    st.write(f"- {e}")
-            else:
-                st.success("Basic validation passed.")
-
-    with colB:
-        if st.button("Route Now", key="route_btn"):
+        if st.button("Route Now", key="route_btn", use_container_width=True):
             try:
                 st.session_state.routes_df = compute_routes_df(
                     st.session_state.tray_df,
@@ -3259,15 +3243,8 @@ with tab5:
             "Cables(input)": st.session_state.cables_df,
         }
 
-        updated_bytes = write_updated_workbook_bytes(dfs_for_export)
         routed_bytes = write_routed_workbook_bytes(dfs_for_export, routes_df)
 
-        st.download_button(
-            "Download UPDATED workbook (edited sheets only)",
-            data=updated_bytes,
-            file_name="network_configuration_updated.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
         st.download_button(
             "Download ROUTED workbook (includes CableRoutes(output))",
             data=routed_bytes,
