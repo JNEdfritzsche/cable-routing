@@ -1352,6 +1352,72 @@ def apply_offset_to_nodes(tray_df: pd.DataFrame, node_names: list[str], dx: floa
     return tray_df
 
 
+def apply_scale_to_nodes(tray_df: pd.DataFrame, node_names: list[str], scale_factor: float) -> pd.DataFrame:
+    """Scale specified nodes from their center point."""
+    if not node_names or scale_factor <= 0:
+        return tray_df
+    
+    tray_df = ensure_xy_columns(tray_df)
+    tray_df = tray_df.copy()
+    
+    # Convert X and Y columns to float64 to avoid dtype warnings
+    tray_df["X"] = pd.to_numeric(tray_df["X"], errors="coerce")
+    tray_df["Y"] = pd.to_numeric(tray_df["Y"], errors="coerce")
+    
+    rn_series = tray_df["RunName"].astype(str).str.strip()
+    
+    # Calculate center point (average of all selected nodes)
+    positions = []
+    indices = []
+    for node_name in node_names:
+        node_name = str(node_name).strip()
+        if not node_name or node_name == PROBE_ID:
+            continue
+        
+        mask = rn_series == node_name
+        if mask.any():
+            for idx in tray_df[mask].index:
+                x_val = tray_df.loc[idx, "X"]
+                y_val = tray_df.loc[idx, "Y"]
+                
+                try:
+                    x = float(x_val) if pd.notna(x_val) else 0.0
+                except Exception:
+                    x = 0.0
+                try:
+                    y = float(y_val) if pd.notna(y_val) else 0.0
+                except Exception:
+                    y = 0.0
+                
+                positions.append((x, y))
+                indices.append(idx)
+    
+    if not positions:
+        return tray_df
+    
+    # Calculate center
+    center_x = sum(p[0] for p in positions) / len(positions)
+    center_y = sum(p[1] for p in positions) / len(positions)
+    
+    # Scale each node from the center
+    for i, idx in enumerate(indices):
+        x, y = positions[i]
+        
+        # Calculate position relative to center
+        rel_x = x - center_x
+        rel_y = y - center_y
+        
+        # Scale the relative position
+        new_rel_x = rel_x * scale_factor
+        new_rel_y = rel_y * scale_factor
+        
+        # Calculate new absolute position
+        tray_df.loc[idx, "X"] = center_x + new_rel_x
+        tray_df.loc[idx, "Y"] = center_y + new_rel_y
+    
+    return tray_df
+
+
 # ============================================================
 # UNSAVED LAYOUT REMINDER helpers
 # ============================================================
@@ -1553,6 +1619,10 @@ def df_add_node(tray_df: pd.DataFrame, name: str, noise_level_text: str = "", x=
         return tray_df, False
 
     df = ensure_xy_columns(tray_df.copy())
+    
+    # Ensure X and Y columns are float64 dtype to avoid dtype warnings
+    df["X"] = pd.to_numeric(df["X"], errors="coerce")
+    df["Y"] = pd.to_numeric(df["Y"], errors="coerce")
 
     if "RunName" not in df.columns:
         df["RunName"] = ""
@@ -1571,19 +1641,19 @@ def df_add_node(tray_df: pd.DataFrame, name: str, noise_level_text: str = "", x=
 
     if (x is None or str(x).strip() == "") and (y is None or str(y).strip() == ""):
         dx, dy = _compute_default_xy_near_network(df)
-        new_row["X"] = dx
-        new_row["Y"] = dy
+        new_row["X"] = dx if dx is not None else None
+        new_row["Y"] = dy if dy is not None else None
     else:
         try:
             if x is not None and str(x).strip() != "":
                 new_row["X"] = float(x)
         except Exception:
-            pass
+            new_row["X"] = None
         try:
             if y is not None and str(y).strip() != "":
                 new_row["Y"] = float(y)
         except Exception:
-            pass
+            new_row["Y"] = None
 
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     return df, True
@@ -2439,6 +2509,47 @@ with tabG:
                     st.session_state.graph_key_v += 1
                     st.success(f"Offset applied! Moved {len(sel_nodes2)} nodes by ({dx}, {dy})")
                     st.rerun()
+                
+                st.divider()
+                
+                # Scale Multiple Nodes
+                st.markdown("**Scale Multiple Nodes**")
+                st.caption("Scales nodes from their center point")
+                
+                # Initialize scale value in session state if not present
+                if "scale_value" not in st.session_state:
+                    st.session_state.scale_value = 1.0
+                
+                scale_col1, scale_col2 = st.columns([3, 1])
+                with scale_col1:
+                    st.session_state.scale_value = st.number_input(
+                        "Scale factor",
+                        value=st.session_state.scale_value,
+                        min_value=0.1,
+                        step=0.1,
+                        key="scale_input"
+                    )
+                with scale_col2:
+                    # Add vertical spacing to align button with number input
+                    st.write("")
+                    if st.button("Apply", key="apply_scale_btn", width="stretch"):
+                        scale_factor = float(st.session_state.scale_value)
+                        if scale_factor == 1.0:
+                            pass
+                        else:
+                            st.session_state.tray_df = apply_scale_to_nodes(
+                                st.session_state.tray_df,
+                                sel_nodes2,
+                                scale_factor
+                            )
+                            st.session_state.layout_unsaved_hint = True
+                            st.session_state.graph_key_v += 1
+                            st.success(f"Scale applied! Scaled {len(sel_nodes2)} nodes by factor {scale_factor:.2f}")
+                            st.rerun()
+                
+                # Display warning if scale factor is 1.0
+                if st.session_state.scale_value == 1.0:
+                    st.info("Scale factor is 1.0 — no change will occur")
                 
                 st.divider()
                 
