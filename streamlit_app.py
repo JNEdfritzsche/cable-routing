@@ -75,22 +75,119 @@ class CableNetwork:
         if exposed is not None:
             self.endpoint_exposed[device_name] = bool(exposed)
 
-    def find_route(self, starts, ends, allowed_noise_level):
-        visited = set()
-        queue = deque([[start] for start in starts])
+    def find_route(self, starts, ends, allowed_noise_level, include_nodes=None, exclude_nodes=None):
+        """
+        Find a route from starts to ends with allowed noise level.
+        
+        Args:
+            starts: List of starting nodes
+            ends: Set of ending nodes
+            allowed_noise_level: Required noise level for the path
+            include_nodes: If provided, route must pass through ALL of these nodes
+            exclude_nodes: If provided, route must avoid these nodes
+        
+        Returns:
+            List representing the path, or None if no valid route exists
+        """
+        # Normalize include/exclude sets
+        if include_nodes is None:
+            include_nodes = set()
+        else:
+            include_nodes = set(n.strip() for n in include_nodes if n.strip())
+        
+        if exclude_nodes is None:
+            exclude_nodes = set()
+        else:
+            exclude_nodes = set(n.strip() for n in exclude_nodes if n.strip())
+        
         end_set = set(ends)
+        
+        # If no include_nodes specified, use simple BFS
+        if not include_nodes:
+            visited = set()
+            queue = deque([[start] for start in starts])
+            
+            while queue:
+                path = queue.popleft()
+                node = path[-1]
+                if node in end_set:
+                    return path
+                if node not in visited:
+                    visited.add(node)
+                    for neighbor, neighbor_levels in self.graph[node]:
+                        if neighbor not in visited and allowed_noise_level in (neighbor_levels or set()):
+                            if neighbor in exclude_nodes:
+                                continue
+                            queue.append(path + [neighbor])
+            return None
+        
+        # With include_nodes: find path through ALL include nodes
+        # Strategy: route from start -> each include node -> end, ensuring we visit all
+        include_list = list(include_nodes)
+        
+        # Helper: find route between two node sets
+        def find_path_between(starts_set, ends_set, exclude_set, visited_global=None):
+            if visited_global is None:
+                visited_global = set()
+            visited = set()
+            queue = deque([[start] for start in starts_set])
+            
+            while queue:
+                path = queue.popleft()
+                node = path[-1]
+                if node in ends_set:
+                    return path
+                if node not in visited:
+                    visited.add(node)
+                    for neighbor, neighbor_levels in self.graph[node]:
+                        if neighbor not in visited and allowed_noise_level in (neighbor_levels or set()):
+                            if neighbor in exclude_set:
+                                continue
+                            queue.append(path + [neighbor])
+            return None
+        
+        # Try to build a path that visits all include_nodes
+        # Start from start_trays, go through all include_nodes, then to end_trays
+        current_starts = set(starts)
+        full_path = []
+        remaining_includes = set(include_list)
+        
+        while remaining_includes:
+            # Find closest include_node from current position
+            closest_path = None
+            closest_node = None
+            
+            for inc_node in remaining_includes:
+                path = find_path_between(current_starts, {inc_node}, exclude_nodes)
+                if path:
+                    if closest_path is None or len(path) < len(closest_path):
+                        closest_path = path
+                        closest_node = inc_node
+            
+            if closest_path is None:
+                # Can't reach any remaining include node
+                return None
+            
+            # Add path to full path (avoiding duplication at junction)
+            if full_path:
+                full_path.extend(closest_path[1:])
+            else:
+                full_path = closest_path
+            
+            current_starts = {closest_node}
+            remaining_includes.discard(closest_node)
+        
+        # Now route from last include node to end
+        final_path = find_path_between(current_starts, end_set, exclude_nodes)
+        if final_path is None:
+            return None
+        
+        # Combine: full_path already ends at the last include node
+        if len(final_path) > 1:
+            full_path.extend(final_path[1:])
+        
+        return full_path
 
-        while queue:
-            path = queue.popleft()
-            node = path[-1]
-            if node in end_set:
-                return path
-            if node not in visited:
-                visited.add(node)
-                for neighbor, neighbor_levels in self.graph[node]:
-                    if neighbor not in visited and allowed_noise_level in (neighbor_levels or set()):
-                        queue.append(path + [neighbor])
-        return None
 
     def build_from_dfs(self, trays_df: pd.DataFrame, connections_df: pd.DataFrame, endpoints_df: pd.DataFrame):
         for _, row in trays_df.iterrows():
@@ -152,6 +249,16 @@ class CableNetwork:
             except Exception:
                 continue
 
+            # Extract INCLUDE and EXCLUDE columns (handle NaN values properly)
+            include_val = row.get("INCLUDE", "")
+            exclude_val = row.get("EXCLUDE", "")
+            
+            include_str = "" if pd.isna(include_val) else str(include_val).strip()
+            exclude_str = "" if pd.isna(exclude_val) else str(exclude_val).strip()
+            
+            include_nodes = [n.strip() for n in include_str.split(",") if n.strip()] if include_str else []
+            exclude_nodes = [n.strip() for n in exclude_str.split(",") if n.strip()] if exclude_str else []
+
             key = sort if sort is not None else name
             if key in seen:
                 continue
@@ -162,12 +269,17 @@ class CableNetwork:
                 "name": name,
                 "start": start,
                 "end": end,
-                "noise_level": noise_level
+                "noise_level": noise_level,
+                "include_nodes": include_nodes,
+                "exclude_nodes": exclude_nodes
             })
 
         results = []
         for cable in cables:
             nl = cable["noise_level"]
+            include_nodes = cable["include_nodes"]
+            exclude_nodes = cable["exclude_nodes"]
+            warnings = []
 
             # Special case: route is internal if source and destination are the same
             if cable["start"] == cable["end"]:
@@ -185,7 +297,18 @@ class CableNetwork:
                 elif not end_trays:
                     path_result = "Error: No end endpoint with matching noise level"
                 else:
-                    path = self.find_route(start_trays, set(end_trays), nl)
+                    # Validate INCLUDE nodes have matching noise level
+                    if include_nodes:
+                        for node in include_nodes:
+                            node_levels = self.noise_levels.get(node, set())
+                            if nl not in node_levels:
+                                warnings.append(f"INCLUDE node '{node}' does not support noise level {nl} (supports: {node_levels if node_levels else 'none'})")
+                    
+                    # Try to find route with constraints
+                    path = self.find_route(start_trays, set(end_trays), nl, 
+                                          include_nodes=include_nodes if include_nodes else None,
+                                          exclude_nodes=exclude_nodes if exclude_nodes else None)
+                    
                     if path:
                         suffix = ""
                         if nl == 1:
@@ -219,17 +342,29 @@ class CableNetwork:
 
                         path_result = ",".join(parts)
                     else:
-                        path_result = "No valid route"
+                        # No route found; provide diagnostic message
+                        if include_nodes:
+                            path_result = f"Error: No valid route using only INCLUDE nodes: {', '.join(include_nodes)}"
+                        elif exclude_nodes:
+                            path_result = f"Error: No valid route while avoiding EXCLUDE nodes: {', '.join(exclude_nodes)}"
+                        else:
+                            path_result = "No valid route"
 
 
-            results.append({
+            result_entry = {
                 "Sort": cable["sort"],
                 "Cable number": cable["name"],
                 "equipfrom": cable["start"],
                 "equipto": cable["end"],
                 "Noise Level": nl,
                 "Via": path_result
-            })
+            }
+            
+            # Append warnings as a separate column if any exist
+            if warnings:
+                result_entry["Warnings"] = "; ".join(warnings)
+            
+            results.append(result_entry)
 
         return pd.DataFrame(results)
 
@@ -429,9 +564,16 @@ def reverse_engineer_from_routes(xlsx_path: str):
 
 REQUIRED_SHEETS = ["Tray", "Connections", "Endpoints", "Cables(input)"]
 
-def load_excel_to_dfs(file_bytes: bytes) -> dict:
+def load_excel_to_dfs(file_bytes: bytes) -> tuple[dict, bool]:
+    """
+    Load Excel file into dataframes.
+    Returns: (dfs dict, is_older_template bool)
+    is_older_template is True if INCLUDE/EXCLUDE columns were added to Cables(input)
+    """
     xls = pd.ExcelFile(BytesIO(file_bytes))
     dfs = {}
+    is_older_template = False
+    
     for sh in REQUIRED_SHEETS:
         if sh not in xls.sheet_names:
             raise ValueError(f"Missing required sheet: {sh}")
@@ -460,7 +602,16 @@ def load_excel_to_dfs(file_bytes: bytes) -> dict:
         elif "Exposed Conduit Route?" in dfs["Connections"].columns and "Exposed?" not in dfs["Connections"].columns:
             dfs["Connections"].rename(columns={"Exposed Conduit Route?": "Exposed?"}, inplace=True)
     
-    return dfs
+    # Ensure Cables(input) has INCLUDE and EXCLUDE columns (for backwards compatibility)
+    if "Cables(input)" in dfs:
+        if "INCLUDE" not in dfs["Cables(input)"].columns:
+            dfs["Cables(input)"]["INCLUDE"] = ""
+            is_older_template = True
+        if "EXCLUDE" not in dfs["Cables(input)"].columns:
+            dfs["Cables(input)"]["EXCLUDE"] = ""
+            is_older_template = True
+    
+    return dfs, is_older_template
 
 def write_updated_workbook_bytes(dfs: dict) -> bytes:
     out = BytesIO()
@@ -583,10 +734,10 @@ def build_demo_workbook_bytes() -> bytes:
     ])
 
     cables = pd.DataFrame([
-        {"Sort": 1, "Cable number": "+CBL-0001", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 1},
-        {"Sort": 2, "Cable number": "+CBL-0002", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 2},
-        {"Sort": 3, "Cable number": "+CBL-0003", "equipfrom": "PANEL-C", "equipto": "PANEL-B", "Noise Level": 1},
-        {"Sort": 4, "Cable number": "+CBL-0004", "equipfrom": "PANEL-D", "equipto": "PANEL-B", "Noise Level": 2},
+        {"Sort": 1, "Cable number": "+CBL-0001", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 1, "INCLUDE": "", "EXCLUDE": ""},
+        {"Sort": 2, "Cable number": "+CBL-0002", "equipfrom": "PANEL-A", "equipto": "PANEL-B", "Noise Level": 2, "INCLUDE": "", "EXCLUDE": ""},
+        {"Sort": 3, "Cable number": "+CBL-0003", "equipfrom": "PANEL-C", "equipto": "PANEL-B", "Noise Level": 1, "INCLUDE": "", "EXCLUDE": ""},
+        {"Sort": 4, "Cable number": "+CBL-0004", "equipfrom": "PANEL-D", "equipto": "PANEL-B", "Noise Level": 2, "INCLUDE": "", "EXCLUDE": ""},
     ])
 
     out = BytesIO()
@@ -1777,6 +1928,7 @@ st.session_state.setdefault("endpoints_df", None)
 st.session_state.setdefault("cables_df", None)
 st.session_state.setdefault("routes_df", None)
 st.session_state.setdefault("upload_hash", None)
+st.session_state.setdefault("is_older_template", False)
 
 st.session_state.setdefault("sel_nodes", [])
 st.session_state.setdefault("sel_edges", [])
@@ -1883,7 +2035,7 @@ if file_bytes is not None:
     try:
         this_hash = hashlib.md5(file_bytes).hexdigest()
         if st.session_state.upload_hash != this_hash:
-            loaded = load_excel_to_dfs(file_bytes)
+            loaded, is_older_template = load_excel_to_dfs(file_bytes)
 
             tdf_loaded = ensure_xy_columns(loaded["Tray"])
             st.session_state.tray_df = tdf_loaded
@@ -1892,6 +2044,7 @@ if file_bytes is not None:
             st.session_state.cables_df = loaded["Cables(input)"]
             st.session_state.routes_df = None
             st.session_state.upload_hash = this_hash
+            st.session_state.is_older_template = is_older_template
             st.session_state.sel_nodes = []
             st.session_state.sel_edges = []
             st.session_state.focus_node = None
@@ -1919,6 +2072,13 @@ if file_bytes is not None:
             st.session_state.save_positions_notice = None
             st.session_state.graph_interaction_sig = None
 
+            if is_older_template:
+                st.sidebar.warning(
+                    "⚠️ **Older template detected** — Your workbook is using an older template without the INCLUDE/EXCLUDE columns. "
+                    "These columns have been automatically added with empty values. "
+                    "Once you route your cables and download the updated workbook, you'll have the latest template format with "
+                    "support for custom route preferences."
+                )
             st.sidebar.success("Workbook loaded.")
     except Exception as e:
         st.sidebar.error(f"Failed to load workbook: {e}")
@@ -3312,7 +3472,7 @@ with tab_reverse:
                 if re_cables_original is not None:
                     re_cables_original.to_excel(writer, sheet_name="Cables(input)", index=False)
                 else:
-                    empty_cables = pd.DataFrame(columns=["Cable number", "equipfrom", "equipto", "Noise Level", "Sort"])
+                    empty_cables = pd.DataFrame(columns=["Cable number", "equipfrom", "equipto", "Noise Level", "Sort", "INCLUDE", "EXCLUDE"])
                     empty_cables.to_excel(writer, sheet_name="Cables(input)", index=False)
                 
                 # Include original CableRoutes(output) for reference
