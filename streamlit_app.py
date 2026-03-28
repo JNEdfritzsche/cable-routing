@@ -2486,7 +2486,6 @@ with tabG:
                     else:
                         st.warning("Could not add any connections.")
                 
-                st.divider()
                 
                 # Move Multiple Nodes
                 st.markdown("**Move Multiple Nodes**")
@@ -2509,8 +2508,6 @@ with tabG:
                     st.session_state.graph_key_v += 1
                     st.success(f"Offset applied! Moved {len(sel_nodes2)} nodes by ({dx}, {dy})")
                     st.rerun()
-                
-                st.divider()
                 
                 # Scale Multiple Nodes
                 st.markdown("**Scale Multiple Nodes**")
@@ -2550,8 +2547,6 @@ with tabG:
                 # Display warning if scale factor is 1.0
                 if st.session_state.scale_value == 1.0:
                     st.info("Scale factor is 1.0 — no change will occur")
-                
-                st.divider()
                 
                 # Get noise levels for all selected nodes
                 noise_levels = []
@@ -2630,8 +2625,6 @@ with tabG:
                         st.session_state.graph_key_v += 1
                         st.rerun()
                 
-                st.divider()
-                
                 # Duplicate group
                 if st.button("Duplicate selected group", key="dup_group_btn", width="stretch"):
                     new_df, new_names = df_duplicate_nodes(st.session_state.tray_df, sel_nodes2)
@@ -2666,8 +2659,6 @@ with tabG:
                     st.write(", ".join(eps))
                 else:
                     st.caption("No endpoints reference this tray/conduit (from Endpoints sheet).")
-
-                st.divider()
 
                 st.markdown("**Connect this node**")
                 connect_options = [""] + [n for n in node_names if n != node_id]
@@ -2710,8 +2701,6 @@ with tabG:
                                 st.success(f"Deleted connection: {node_id} ↔ {tgt}")
                                 st.session_state.graph_key_v += 1
                             st.rerun()
-
-                st.divider()
 
                 if st.button("Delete node", key="sel_delete_node", width="stretch"):
                     t, c, e = df_delete_node(
@@ -2775,7 +2764,6 @@ with tabG:
                     else:
                         st.warning("Enter a name for the duplicate.")
 
-                st.divider()
                 st.markdown("**Edit noise level**")
 
                 preset_map = {
@@ -2858,8 +2846,6 @@ with tabG:
                         st.success("Exposed status updated. Rerendering graph...")
                         st.rerun()
                     
-                    st.divider()
-
                     if st.button("Delete connection", key="sel_delete_edge", width="stretch"):
                         before = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
                         st.session_state.connections_df = df_delete_edge(st.session_state.connections_df, a, b)
@@ -2881,515 +2867,495 @@ with tabG:
             else:
                 st.info("Select a node or connection in the graph to edit it here.")
 
-            st.divider()
+            with st.expander("🔍 Search / Focus", expanded=False):
+                st.session_state.focus_depth = st.slider(
+                    "Neighborhood depth",
+                    min_value=1,
+                    max_value=6,
+                    value=int(st.session_state.focus_depth),
+                    step=1,
+                )
 
-            st.markdown("### Search / Focus")
+                focus_pick = st.selectbox(
+                    "Find a node (type to search)",
+                    options=[""] + node_names,
+                    index=0 if not st.session_state.focus_node else (
+                        node_names.index(st.session_state.focus_node) + 1
+                        if st.session_state.focus_node in node_names else 0
+                    ),
+                    key="focus_pick_select",
+                )
 
-            st.session_state.focus_depth = st.slider(
-                "Neighborhood depth",
-                min_value=1,
-                max_value=6,
-                value=int(st.session_state.focus_depth),
-                step=1,
-            )
-
-            focus_pick = st.selectbox(
-                "Find a node (type to search)",
-                options=[""] + node_names,
-                index=0 if not st.session_state.focus_node else (
-                    node_names.index(st.session_state.focus_node) + 1
-                    if st.session_state.focus_node in node_names else 0
-                ),
-                key="focus_pick_select",
-            )
-
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Focus", width="stretch", key="focus_btn"):
-                    if focus_pick and focus_pick.strip():
-                        st.session_state.focus_node = focus_pick.strip()
-                        st.session_state.sel_nodes = [st.session_state.focus_node]
-                        st.session_state.sel_edges = []
-                        st.session_state.graph_key_v += 1
-                        st.rerun()
-                    else:
-                        st.warning("Pick a node to focus.")
-            with c2:
-                if st.button("Clear", width="stretch", key="clear_focus_btn"):
-                    st.session_state.focus_node = None
-                    st.session_state.graph_key_v += 1
-                    st.rerun()
-
-            if st.session_state.focus_node:
-                st.caption(f"Focused on: **{st.session_state.focus_node}** (showing local neighborhood)")
-
-            st.divider()
-
-            st.markdown("### Connection")
-
-            conn_from = st.selectbox("From (type to search)", options=[""] + node_names, index=0, key="conn_from")
-            conn_to = st.selectbox("To (type to search)", options=[""] + node_names, index=0, key="conn_to")
-
-            b_add, b_del = st.columns(2)
-            with b_add:
-                if st.button("Add", width="stretch", key="add_edge_btn"):
-                    a = (conn_from or "").strip()
-                    b = (conn_to or "").strip()
-                    if not a or not b:
-                        st.warning("Choose both From and To.")
-                    elif a == b:
-                        st.warning("From and To must be different.")
-                    else:
-                        new_con, added = df_add_edge(st.session_state.connections_df, a, b)
-                        if added:
-                            st.session_state.connections_df = new_con
-                            st.session_state.routes_df = None
-                            st.success(f"Added connection: {a} ↔ {b}")
-                            st.session_state.graph_key_v += 1
-                            st.rerun()
-                        else:
-                            st.info("That connection already exists (or could not be added).")
-            with b_del:
-                if st.button("Delete", width="stretch", key="delete_edge_btn"):
-                    a = (conn_from or "").strip()
-                    b = (conn_to or "").strip()
-                    if not a or not b:
-                        st.warning("Choose both From and To.")
-                    elif a == b:
-                        st.warning("From and To must be different.")
-                    else:
-                        before = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
-                        st.session_state.connections_df = df_delete_edge(st.session_state.connections_df, a, b)
-                        after = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
-                        st.session_state.routes_df = None
-                        if before == after:
-                            st.info("No matching connection was found to delete.")
-                        else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Focus", width="stretch", key="focus_btn"):
+                        if focus_pick and focus_pick.strip():
+                            st.session_state.focus_node = focus_pick.strip()
+                            st.session_state.sel_nodes = [st.session_state.focus_node]
                             st.session_state.sel_edges = []
-                            st.session_state.sel_nodes = []
-                            st.success(f"Deleted connection: {a} ↔ {b}")
                             st.session_state.graph_key_v += 1
-                        st.rerun()
-
-            st.divider()
-
-            st.markdown("### Add node")
-
-            new_node_name = st.text_input("New node name", value="", key="add_node_name")
-            nl_preset = st.selectbox("Noise level (preset)", options=["(leave blank)", "1", "2", "1,2", "3", "4", "3,4"], index=0, key="add_node_nl_preset")
-            nl_custom = st.text_input("Noise level (custom text, optional)", value="", key="add_node_nl_custom")
-
-            p1, p2 = st.columns(2)
-            with p1:
-                new_x = st.text_input("X (optional)", value="", key="add_node_x")
-            with p2:
-                new_y = st.text_input("Y (optional)", value="", key="add_node_y")
-
-            if st.button("Add node", width="stretch", key="add_node_btn"):
-                name = (new_node_name or "").strip()
-                if not name:
-                    st.warning("Enter a node name.")
-                else:
-                    if (nl_custom or "").strip():
-                        nl_text = nl_custom.strip()
-                    else:
-                        nl_text = "" if nl_preset == "(leave blank)" else nl_preset
-
-                    new_df, added = df_add_node(
-                        st.session_state.tray_df,
-                        name=name,
-                        noise_level_text=nl_text,
-                        x=new_x,
-                        y=new_y,
-                    )
-
-                    if not added:
-                        st.error("Could not add node (it may already exist).")
-                    else:
-                        st.session_state.tray_df = ensure_xy_columns(new_df)
-                        st.session_state.routes_df = None
-                        st.session_state.focus_node = None
-                        st.session_state.sel_nodes = [name]
-                        st.session_state.sel_edges = []
-                        st.success(f"Added node: {name}")
-                        st.session_state.graph_key_v += 1
-                        st.rerun()
-
-            st.divider()
-
-            st.markdown("### Delete node")
-
-            del_pick = st.selectbox("Node to delete (type to search)", options=[""] + node_names, index=0, key="delete_node_pick")
-            if st.button("Delete selected node", width="stretch", key="delete_node_autofill_btn"):
-                if not del_pick.strip():
-                    st.warning("Choose a node to delete.")
-                else:
-                    node_id = del_pick.strip()
-                    t, c, e = df_delete_node(
-                        st.session_state.tray_df,
-                        st.session_state.connections_df,
-                        st.session_state.endpoints_df,
-                        node_id
-                    )
-                    st.session_state.tray_df = ensure_xy_columns(t)
-                    st.session_state.connections_df = c
-                    st.session_state.endpoints_df = e
-                    st.session_state.routes_df = None
-                    if st.session_state.focus_node == node_id:
-                        st.session_state.focus_node = None
-                    if st.session_state.sel_nodes and st.session_state.sel_nodes[0] == node_id:
-                        st.session_state.sel_nodes = []
-                        st.session_state.sel_edges = []
-                    st.success(f"Deleted node: {node_id}")
-                    st.session_state.graph_key_v += 1
-                    st.rerun()
-
-            st.divider()
-
-            st.markdown("### Endpoint lookup")
-
-            ep_pick = st.selectbox(
-                "Choose an endpoint/device (type to search)",
-                options=[""] + endpoint_names,
-                index=0,
-                key="endpoint_lookup_pick",
-            )
-
-            e1, e2 = st.columns([1, 1])
-            with e1:
-                if st.button("Highlight connected trays/conduits", width="stretch", key="endpoint_lookup_highlight_btn"):
-                    if not (ep_pick or "").strip():
-                        st.warning("Pick an endpoint/device.")
-                    else:
-                        ep = (ep_pick or "").strip().lstrip("+")
-                        trays = endpoint_to_trays.get(ep, [])
-                        trays_present = [t for t in trays if t in node_names]
-                        st.session_state.endpoint_highlight_nodes = set(trays_present)
-                        st.session_state.endpoint_highlight_ep = ep
-                        st.session_state.graph_key_v += 1
-                        if trays_present:
-                            st.success(f"Highlighted {len(trays_present)} tray/conduit node(s) for {ep}.")
-                        else:
-                            st.info("No trays/conduits for that endpoint are present in Tray.RunName (nothing to highlight).")
-                        st.rerun()
-
-            with e2:
-                if st.button("Clear endpoint highlight", width="stretch", key="endpoint_lookup_clear_highlight_btn"):
-                    st.session_state.endpoint_highlight_nodes = set()
-                    st.session_state.endpoint_highlight_ep = None
-                    st.session_state.graph_key_v += 1
-                    st.success("Cleared endpoint highlight.")
-                    st.rerun()
-
-            if st.session_state.endpoint_highlight_ep:
-                st.caption(f"Endpoint highlight active for: **{st.session_state.endpoint_highlight_ep}**")
-                if st.session_state.endpoint_highlight_nodes:
-                    st.write(", ".join(sorted(st.session_state.endpoint_highlight_nodes)))
-                else:
-                    st.write("No nodes are currently highlighted for this endpoint.")
-
-            st.divider()
-
-            st.markdown("### Route lookup")
-
-            routes_df = st.session_state.routes_df
-            if routes_df is None:
-                st.info("Routes are not computed yet. Compute them to enable route lookup/highlighting.")
-                if st.button("Compute routes now", width="stretch", key="compute_routes_in_graph_editor_btn"):
-                    try:
-                        st.session_state.routes_df = compute_routes_df(
-                            st.session_state.tray_df,
-                            st.session_state.connections_df,
-                            st.session_state.endpoints_df,
-                            st.session_state.cables_df,
-                        )
-                        st.success("Routes computed. You can now use Route lookup.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Routing failed: {e}")
-            else:
-                try:
-                    ccol = "Cable number" if "Cable number" in routes_df.columns else ("Cable Number" if "Cable Number" in routes_df.columns else None)
-                    if ccol is None:
-                        cable_options = []
-                    else:
-                        cable_options = (
-                            routes_df[ccol]
-                            .astype(str)
-                            .fillna("")
-                            .map(str.strip)
-                            .replace("", pd.NA)
-                            .dropna()
-                            .unique()
-                            .tolist()
-                        )
-                        cable_options = sorted(cable_options, key=lambda s: s.lower())
-                except Exception:
-                    cable_options = []
-
-                cable_pick = st.selectbox(
-                    "Choose a routed cable (type to search)",
-                    options=[""] + cable_options,
-                    index=0,
-                    key="route_lookup_pick",
-                )
-
-                r1, r2 = st.columns([1, 1])
-                with r1:
-                    if st.button("Highlight route path", width="stretch", key="route_lookup_highlight_btn"):
-                        if not (cable_pick or "").strip():
-                            st.warning("Pick a cable.")
-                        else:
-                            cnum = (cable_pick or "").strip()
-                            st.session_state.route_highlight_cable = cnum
-
-                            df = routes_df.copy()
-                            col = "Cable number" if "Cable number" in df.columns else ("Cable Number" if "Cable Number" in df.columns else None)
-                            if col is None or "Via" not in df.columns:
-                                st.error("Routes table is missing required columns (Cable number/Cable Number, Via).")
-                            else:
-                                mask = df[col].astype(str).map(str.strip) == cnum
-                                if not mask.any():
-                                    st.warning("Could not find that cable in the routed output.")
-                                else:
-                                    via = df.loc[mask, "Via"].iloc[0]
-                                    path_nodes = nodes_from_via_string(via)
-                                    present = [n for n in path_nodes if n in node_names]
-                                    st.session_state.route_highlight_nodes = set(present)
-
-                                    st.session_state.graph_key_v += 1
-                                    if present:
-                                        st.success(f"Highlighted {len(present)} node(s) along the route for {cnum}.")
-                                    else:
-                                        st.info("Route did not contain any Tray.RunName nodes to highlight (or it was an error/no-route).")
-                                    st.rerun()
-
-                with r2:
-                    if st.button("Clear route highlight", width="stretch", key="route_lookup_clear_btn"):
-                        st.session_state.route_highlight_nodes = set()
-                        st.session_state.route_highlight_cable = None
-                        st.session_state.graph_key_v += 1
-                        st.success("Cleared route highlight.")
-                        st.rerun()
-
-                if st.session_state.route_highlight_cable:
-                    st.caption(f"Route highlight active for: **{st.session_state.route_highlight_cable}**")
-                    if st.session_state.route_highlight_nodes:
-                        st.write(", ".join(sorted(st.session_state.route_highlight_nodes)))
-                    else:
-                        st.write("No nodes are currently highlighted for this route.")
-
-            st.divider()
-            st.markdown("### Generate route")
-
-            st.session_state.gen_route_mode = st.radio(
-                "Mode",
-                options=["Auto-route (endpoints)", "Manual (click nodes in graph)"],
-                index=0 if st.session_state.gen_route_mode == "Auto-route (endpoints)" else 1,
-                key="gen_route_mode_radio",
-            )
-
-            st.session_state.gen_route_noise_level = st.selectbox(
-                "Noise Level",
-                options=[1, 2, 3, 4],
-                index=[1, 2, 3, 4].index(int(st.session_state.gen_route_noise_level) if st.session_state.gen_route_noise_level else 1),
-                key="gen_route_noise_level_pick",
-            )
-
-            if st.session_state.gen_route_mode == "Auto-route (endpoints)":
-                st.caption("Two search bars: choose Endpoint OR Tray/Conduit on each side.")
-
-                start_pick = st.selectbox(
-                    "Start (endpoint OR tray/conduit)",
-                    options=combined_options,
-                    index=0,
-                    key="gen_route_auto_start_pick_select",
-                    format_func=_format_autoroute_option,
-                )
-
-                end_pick = st.selectbox(
-                    "End (endpoint OR tray/conduit)",
-                    options=combined_options,
-                    index=0,
-                    key="gen_route_auto_end_pick_select",
-                    format_func=_format_autoroute_option,
-                )
-
-                g1, g2 = st.columns([1, 1])
-                with g1:
-                    if st.button("Generate auto-route", width="stretch", key="gen_route_auto_btn"):
-                        nl = int(st.session_state.gen_route_noise_level)
-
-                        path, msg = try_auto_route_packed(
-                            st.session_state.tray_df,
-                            st.session_state.connections_df,
-                            st.session_state.endpoints_df,
-                            start_pick,
-                            end_pick,
-                            nl,
-                        )
-
-                        st.session_state.gen_route_auto_msg = msg
-                        if path:
-                            present = [n for n in path if n in node_names]
-                            st.session_state.gen_route_auto_nodes = set(present)
-                            st.session_state.gen_route_auto_via = format_route_nodes_for_via(path, noise_level=nl)
-                            st.session_state.graph_key_v += 1
-                            st.success("Auto-route generated and highlighted.")
                             st.rerun()
                         else:
+                            st.warning("Pick a node to focus.")
+                with c2:
+                    if st.button("Clear", width="stretch", key="clear_focus_btn"):
+                        st.session_state.focus_node = None
+                        st.session_state.graph_key_v += 1
+                        st.rerun()
+
+                if st.session_state.focus_node:
+                    st.caption(f"Focused on: **{st.session_state.focus_node}** (showing local neighborhood)")
+
+            with st.expander("🔗 Connection", expanded=False):
+                conn_from = st.selectbox("From (type to search)", options=[""] + node_names, index=0, key="conn_from")
+                conn_to = st.selectbox("To (type to search)", options=[""] + node_names, index=0, key="conn_to")
+
+                b_add, b_del = st.columns(2)
+                with b_add:
+                    if st.button("Add", width="stretch", key="add_edge_btn"):
+                        a = (conn_from or "").strip()
+                        b = (conn_to or "").strip()
+                        if not a or not b:
+                            st.warning("Choose both From and To.")
+                        elif a == b:
+                            st.warning("From and To must be different.")
+                        else:
+                            new_con, added = df_add_edge(st.session_state.connections_df, a, b)
+                            if added:
+                                st.session_state.connections_df = new_con
+                                st.session_state.routes_df = None
+                                st.success(f"Added connection: {a} ↔ {b}")
+                                st.session_state.graph_key_v += 1
+                                st.rerun()
+                            else:
+                                st.info("That connection already exists (or could not be added).")
+                with b_del:
+                    if st.button("Delete", width="stretch", key="delete_edge_btn"):
+                        a = (conn_from or "").strip()
+                        b = (conn_to or "").strip()
+                        if not a or not b:
+                            st.warning("Choose both From and To.")
+                        elif a == b:
+                            st.warning("From and To must be different.")
+                        else:
+                            before = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                            st.session_state.connections_df = df_delete_edge(st.session_state.connections_df, a, b)
+                            after = len(st.session_state.connections_df) if st.session_state.connections_df is not None else 0
+                            st.session_state.routes_df = None
+                            if before == after:
+                                st.info("No matching connection was found to delete.")
+                            else:
+                                st.session_state.sel_edges = []
+                                st.session_state.sel_nodes = []
+                                st.success(f"Deleted connection: {a} ↔ {b}")
+                                st.session_state.graph_key_v += 1
+                            st.rerun()
+
+            with st.expander("➕ Add node", expanded=False):
+                new_node_name = st.text_input("New node name", value="", key="add_node_name")
+                nl_preset = st.selectbox("Noise level (preset)", options=["(leave blank)", "1", "2", "1,2", "3", "4", "3,4"], index=0, key="add_node_nl_preset")
+                nl_custom = st.text_input("Noise level (custom text, optional)", value="", key="add_node_nl_custom")
+
+                p1, p2 = st.columns(2)
+                with p1:
+                    new_x = st.text_input("X (optional)", value="", key="add_node_x")
+                with p2:
+                    new_y = st.text_input("Y (optional)", value="", key="add_node_y")
+
+                if st.button("Add node", width="stretch", key="add_node_btn"):
+                    name = (new_node_name or "").strip()
+                    if not name:
+                        st.warning("Enter a node name.")
+                    else:
+                        if (nl_custom or "").strip():
+                            nl_text = nl_custom.strip()
+                        else:
+                            nl_text = "" if nl_preset == "(leave blank)" else nl_preset
+
+                        new_df, added = df_add_node(
+                            st.session_state.tray_df,
+                            name=name,
+                            noise_level_text=nl_text,
+                            x=new_x,
+                            y=new_y,
+                        )
+
+                        if not added:
+                            st.error("Could not add node (it may already exist).")
+                        else:
+                            st.session_state.tray_df = ensure_xy_columns(new_df)
+                            st.session_state.routes_df = None
+                            st.session_state.focus_node = None
+                            st.session_state.sel_nodes = [name]
+                            st.session_state.sel_edges = []
+                            st.success(f"Added node: {name}")
+                            st.session_state.graph_key_v += 1
+                            st.rerun()
+
+            with st.expander("🗑️ Delete node", expanded=False):
+                del_pick = st.selectbox("Node to delete (type to search)", options=[""] + node_names, index=0, key="delete_node_pick")
+                if st.button("Delete selected node", width="stretch", key="delete_node_autofill_btn"):
+                    if not del_pick.strip():
+                        st.warning("Choose a node to delete.")
+                    else:
+                        node_id = del_pick.strip()
+                        t, c, e = df_delete_node(
+                            st.session_state.tray_df,
+                            st.session_state.connections_df,
+                            st.session_state.endpoints_df,
+                            node_id
+                        )
+                        st.session_state.tray_df = ensure_xy_columns(t)
+                        st.session_state.connections_df = c
+                        st.session_state.endpoints_df = e
+                        st.session_state.routes_df = None
+                        if st.session_state.focus_node == node_id:
+                            st.session_state.focus_node = None
+                        if st.session_state.sel_nodes and st.session_state.sel_nodes[0] == node_id:
+                            st.session_state.sel_nodes = []
+                            st.session_state.sel_edges = []
+                        st.success(f"Deleted node: {node_id}")
+                        st.session_state.graph_key_v += 1
+                        st.rerun()
+
+            with st.expander("📍 Endpoint lookup", expanded=False):
+                ep_pick = st.selectbox(
+                    "Choose an endpoint/device (type to search)",
+                    options=[""] + endpoint_names,
+                    index=0,
+                    key="endpoint_lookup_pick",
+                )
+
+                e1, e2 = st.columns([1, 1])
+                with e1:
+                    if st.button("Highlight connected trays/conduits", width="stretch", key="endpoint_lookup_highlight_btn"):
+                        if not (ep_pick or "").strip():
+                            st.warning("Pick an endpoint/device.")
+                        else:
+                            ep = (ep_pick or "").strip().lstrip("+")
+                            trays = endpoint_to_trays.get(ep, [])
+                            trays_present = [t for t in trays if t in node_names]
+                            st.session_state.endpoint_highlight_nodes = set(trays_present)
+                            st.session_state.endpoint_highlight_ep = ep
+                            st.session_state.graph_key_v += 1
+                            if trays_present:
+                                st.success(f"Highlighted {len(trays_present)} tray/conduit node(s) for {ep}.")
+                            else:
+                                st.info("No trays/conduits for that endpoint are present in Tray.RunName (nothing to highlight).")
+                            st.rerun()
+
+                with e2:
+                    if st.button("Clear endpoint highlight", width="stretch", key="endpoint_lookup_clear_highlight_btn"):
+                        st.session_state.endpoint_highlight_nodes = set()
+                        st.session_state.endpoint_highlight_ep = None
+                        st.session_state.graph_key_v += 1
+                        st.success("Cleared endpoint highlight.")
+                        st.rerun()
+
+                if st.session_state.endpoint_highlight_ep:
+                    st.caption(f"Endpoint highlight active for: **{st.session_state.endpoint_highlight_ep}**")
+                    if st.session_state.endpoint_highlight_nodes:
+                        st.write(", ".join(sorted(st.session_state.endpoint_highlight_nodes)))
+                    else:
+                        st.write("No nodes are currently highlighted for this endpoint.")
+
+
+            with st.expander("📊 Route lookup", expanded=False):
+                routes_df = st.session_state.routes_df
+                if routes_df is None:
+                    st.info("Routes are not computed yet. Compute them to enable route lookup/highlighting.")
+                    if st.button("Compute routes now", width="stretch", key="compute_routes_in_graph_editor_btn"):
+                        try:
+                            st.session_state.routes_df = compute_routes_df(
+                                st.session_state.tray_df,
+                                st.session_state.connections_df,
+                                st.session_state.endpoints_df,
+                                st.session_state.cables_df,
+                            )
+                            st.success("Routes computed. You can now use Route lookup.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Routing failed: {e}")
+                else:
+                    try:
+                        ccol = "Cable number" if "Cable number" in routes_df.columns else ("Cable Number" if "Cable Number" in routes_df.columns else None)
+                        if ccol is None:
+                            cable_options = []
+                        else:
+                            cable_options = (
+                                routes_df[ccol]
+                                .astype(str)
+                                .fillna("")
+                                .map(str.strip)
+                                .replace("", pd.NA)
+                                .dropna()
+                                .unique()
+                                .tolist()
+                            )
+                            cable_options = sorted(cable_options, key=lambda s: s.lower())
+                    except Exception:
+                        cable_options = []
+
+                    cable_pick = st.selectbox(
+                        "Choose a routed cable (type to search)",
+                        options=[""] + cable_options,
+                        index=0,
+                        key="route_lookup_pick",
+                    )
+
+                    r1, r2 = st.columns([1, 1])
+                    with r1:
+                        if st.button("Highlight route path", width="stretch", key="route_lookup_highlight_btn"):
+                            if not (cable_pick or "").strip():
+                                st.warning("Pick a cable.")
+                            else:
+                                cnum = (cable_pick or "").strip()
+                                st.session_state.route_highlight_cable = cnum
+
+                                df = routes_df.copy()
+                                col = "Cable number" if "Cable number" in df.columns else ("Cable Number" if "Cable Number" in df.columns else None)
+                                if col is None or "Via" not in df.columns:
+                                    st.error("Routes table is missing required columns (Cable number/Cable Number, Via).")
+                                else:
+                                    mask = df[col].astype(str).map(str.strip) == cnum
+                                    if not mask.any():
+                                        st.warning("Could not find that cable in the routed output.")
+                                    else:
+                                        via = df.loc[mask, "Via"].iloc[0]
+                                        path_nodes = nodes_from_via_string(via)
+                                        present = [n for n in path_nodes if n in node_names]
+                                        st.session_state.route_highlight_nodes = set(present)
+
+                                        st.session_state.graph_key_v += 1
+                                        if present:
+                                            st.success(f"Highlighted {len(present)} node(s) along the route for {cnum}.")
+                                        else:
+                                            st.info("Route did not contain any Tray.RunName nodes to highlight (or it was an error/no-route).")
+                                        st.rerun()
+
+                    with r2:
+                        if st.button("Clear route highlight", width="stretch", key="route_lookup_clear_btn"):
+                            st.session_state.route_highlight_nodes = set()
+                            st.session_state.route_highlight_cable = None
+                            st.session_state.graph_key_v += 1
+                            st.success("Cleared route highlight.")
+                            st.rerun()
+
+                    if st.session_state.route_highlight_cable:
+                        st.caption(f"Route highlight active for: **{st.session_state.route_highlight_cable}**")
+                        if st.session_state.route_highlight_nodes:
+                            st.write(", ".join(sorted(st.session_state.route_highlight_nodes)))
+                        else:
+                            st.write("No nodes are currently highlighted for this route.")
+
+
+            with st.expander("🧭 Generate route", expanded=False):
+                st.session_state.gen_route_mode = st.radio(
+                    "Mode",
+                    options=["Auto-route (endpoints)", "Manual (click nodes in graph)"],
+                    index=0 if st.session_state.gen_route_mode == "Auto-route (endpoints)" else 1,
+                    key="gen_route_mode_radio",
+                )
+
+                st.session_state.gen_route_noise_level = st.selectbox(
+                    "Noise Level",
+                    options=[1, 2, 3, 4],
+                    index=[1, 2, 3, 4].index(int(st.session_state.gen_route_noise_level) if st.session_state.gen_route_noise_level else 1),
+                    key="gen_route_noise_level_pick",
+                )
+
+                if st.session_state.gen_route_mode == "Auto-route (endpoints)":
+                    st.caption("Two search bars: choose Endpoint OR Tray/Conduit on each side.")
+
+                    start_pick = st.selectbox(
+                        "Start (endpoint OR tray/conduit)",
+                        options=combined_options,
+                        index=0,
+                        key="gen_route_auto_start_pick_select",
+                        format_func=_format_autoroute_option,
+                    )
+
+                    end_pick = st.selectbox(
+                        "End (endpoint OR tray/conduit)",
+                        options=combined_options,
+                        index=0,
+                        key="gen_route_auto_end_pick_select",
+                        format_func=_format_autoroute_option,
+                    )
+
+                    g1, g2 = st.columns([1, 1])
+                    with g1:
+                        if st.button("Generate auto-route", width="stretch", key="gen_route_auto_btn"):
+                            nl = int(st.session_state.gen_route_noise_level)
+
+                            path, msg = try_auto_route_packed(
+                                st.session_state.tray_df,
+                                st.session_state.connections_df,
+                                st.session_state.endpoints_df,
+                                start_pick,
+                                end_pick,
+                                nl,
+                            )
+
+                            st.session_state.gen_route_auto_msg = msg
+                            if path:
+                                present = [n for n in path if n in node_names]
+                                st.session_state.gen_route_auto_nodes = set(present)
+                                st.session_state.gen_route_auto_via = format_route_nodes_for_via(path, noise_level=nl)
+                                st.session_state.graph_key_v += 1
+                                st.success("Auto-route generated and highlighted.")
+                                st.rerun()
+                            else:
+                                st.session_state.gen_route_auto_nodes = set()
+                                st.session_state.gen_route_auto_via = ""
+                                st.session_state.graph_key_v += 1
+                                st.warning(msg)
+                                st.rerun()
+
+                    with g2:
+                        if st.button("Clear generated auto-route", width="stretch", key="gen_route_auto_clear_btn"):
                             st.session_state.gen_route_auto_nodes = set()
                             st.session_state.gen_route_auto_via = ""
+                            st.session_state.gen_route_auto_msg = ""
                             st.session_state.graph_key_v += 1
-                            st.warning(msg)
+                            st.success("Cleared generated auto-route.")
                             st.rerun()
 
-                with g2:
-                    if st.button("Clear generated auto-route", width="stretch", key="gen_route_auto_clear_btn"):
-                        st.session_state.gen_route_auto_nodes = set()
-                        st.session_state.gen_route_auto_via = ""
-                        st.session_state.gen_route_auto_msg = ""
-                        st.session_state.graph_key_v += 1
-                        st.success("Cleared generated auto-route.")
-                        st.rerun()
+                    if st.session_state.gen_route_auto_msg and not st.session_state.gen_route_auto_via:
+                        st.markdown("**Why it failed**")
+                        st.code(st.session_state.gen_route_auto_msg)
 
-                if st.session_state.gen_route_auto_msg and not st.session_state.gen_route_auto_via:
-                    st.markdown("**Why it failed**")
-                    st.code(st.session_state.gen_route_auto_msg)
+                    if st.session_state.gen_route_auto_via:
+                        st.markdown("**Generated Via**")
+                        st.code(st.session_state.gen_route_auto_via)
 
-                if st.session_state.gen_route_auto_via:
-                    st.markdown("**Generated Via**")
-                    st.code(st.session_state.gen_route_auto_via)
+                else:
+                    st.caption(
+                        "Click nodes in the graph (one-by-one) to build a route. "
+                        "Nodes will highlight as you click, and the Via string updates live."
+                    )
 
-            else:
-                st.caption(
-                    "Click nodes in the graph (one-by-one) to build a route. "
-                    "Nodes will highlight as you click, and the Via string updates live."
-                )
+                    m1, m2 = st.columns([1, 1])
+                    with m1:
+                        if st.button("Clear manual route", width="stretch", key="gen_route_manual_clear_btn"):
+                            st.session_state.gen_route_manual_nodes = []
+                            st.session_state.gen_route_manual_via = ""
+                            st.session_state.gen_route_manual_last_clicked = None
+                            st.session_state.graph_key_v += 1
+                            st.success("Cleared manual route.")
+                            st.rerun()
 
-                m1, m2 = st.columns([1, 1])
-                with m1:
-                    if st.button("Clear manual route", width="stretch", key="gen_route_manual_clear_btn"):
-                        st.session_state.gen_route_manual_nodes = []
-                        st.session_state.gen_route_manual_via = ""
-                        st.session_state.gen_route_manual_last_clicked = None
-                        st.session_state.graph_key_v += 1
-                        st.success("Cleared manual route.")
-                        st.rerun()
+                    with m2:
+                        if st.button("Clear ALL generated routes", width="stretch", key="gen_route_clear_all_btn"):
+                            st.session_state.gen_route_auto_nodes = set()
+                            st.session_state.gen_route_auto_via = ""
+                            st.session_state.gen_route_auto_msg = ""
+                            st.session_state.gen_route_manual_nodes = []
+                            st.session_state.gen_route_manual_via = ""
+                            st.session_state.gen_route_manual_last_clicked = None
+                            st.session_state.graph_key_v += 1
+                            st.success("Cleared auto + manual generated routes.")
+                            st.rerun()
 
-                with m2:
-                    if st.button("Clear ALL generated routes", width="stretch", key="gen_route_clear_all_btn"):
-                        st.session_state.gen_route_auto_nodes = set()
-                        st.session_state.gen_route_auto_via = ""
-                        st.session_state.gen_route_auto_msg = ""
-                        st.session_state.gen_route_manual_nodes = []
-                        st.session_state.gen_route_manual_via = ""
-                        st.session_state.gen_route_manual_last_clicked = None
-                        st.session_state.graph_key_v += 1
-                        st.success("Cleared auto + manual generated routes.")
-                        st.rerun()
+                    if st.session_state.gen_route_manual_nodes:
+                        ok, bad_pairs = validate_manual_route_steps(st.session_state.connections_df, st.session_state.gen_route_manual_nodes)
+                        if not ok:
+                            st.warning(
+                                "Manual route has step(s) that are not directly connected in Connections:\n\n"
+                                + "\n".join([f"- {a} ↔ {b}" for a, b in bad_pairs])
+                            )
 
-                if st.session_state.gen_route_manual_nodes:
-                    ok, bad_pairs = validate_manual_route_steps(st.session_state.connections_df, st.session_state.gen_route_manual_nodes)
-                    if not ok:
-                        st.warning(
-                            "Manual route has step(s) that are not directly connected in Connections:\n\n"
-                            + "\n".join([f"- {a} ↔ {b}" for a, b in bad_pairs])
-                        )
+                    st.markdown("**Manual route nodes**")
+                    st.write(" → ".join(st.session_state.gen_route_manual_nodes) if st.session_state.gen_route_manual_nodes else "(none yet)")
 
-                st.markdown("**Manual route nodes**")
-                st.write(" → ".join(st.session_state.gen_route_manual_nodes) if st.session_state.gen_route_manual_nodes else "(none yet)")
+                    st.markdown("**Generated Via (live)**")
+                    st.code(st.session_state.gen_route_manual_via or "")
 
-                st.markdown("**Generated Via (live)**")
-                st.code(st.session_state.gen_route_manual_via or "")
 
-            st.divider()
-
-            st.markdown("### Layout")
-
-            if st.button("Home / Recenter graph view", key="home_recenter_btn", width="stretch"):
-                st.session_state.focus_node = None
-                st.session_state.sel_nodes = []
-                st.session_state.sel_edges = []
-                st.session_state.graph_key_v += 1
-                st.success("Recentered graph view.")
-                st.rerun()
-
-            if not st.session_state.layout_opt_active:
-                if st.button("Optimize layout (turns on physics)", key="opt_turn_on_physics_btn", width="stretch"):
-                    tdf = ensure_xy_columns(st.session_state.tray_df).copy()
-                    backup = {
-                        "RunName": tdf["RunName"].astype(str).tolist(),
-                        "X": tdf["X"].tolist(),
-                        "Y": tdf["Y"].tolist(),
-                    }
-                    st.session_state.layout_opt_backup_xy = backup
-
-                    st.session_state.tray_df["X"] = pd.NA
-                    st.session_state.tray_df["Y"] = pd.NA
-
-                    st.session_state.initial_layout_autosave_active = False
-
-                    st.session_state.routes_df = None
+            with st.expander("📐 Layout", expanded=False):
+                if st.button("Home / Recenter graph view", key="home_recenter_btn", width="stretch"):
                     st.session_state.focus_node = None
                     st.session_state.sel_nodes = []
                     st.session_state.sel_edges = []
-
-                    st.session_state.layout_opt_active = True
-                    st.session_state.layout_opt_last_positions = None
-                    st.session_state.layout_unsaved_hint = False
                     st.session_state.graph_key_v += 1
-                    st.success("Physics enabled for optimization. Let it settle, then save or cancel.")
+                    st.success("Recentered graph view.")
                     st.rerun()
-            else:
-                st.info(
-                    "Optimization is active (physics ON).\n\n"
-                    "✅ Let the graph settle, then click **Save optimized positions (turns off physics)**.\n"
-                    "↩️ Or click **Cancel optimization (turns off physics)** to revert to the previous layout."
-                )
 
-                if st.button("Save optimized positions (turns off physics)", key="save_opt_positions_btn", width="stretch"):
-                    positions2 = st.session_state.layout_opt_last_positions
+                if not st.session_state.layout_opt_active:
+                    if st.button("Optimize layout (turns on physics)", key="opt_turn_on_physics_btn", width="stretch"):
+                        tdf = ensure_xy_columns(st.session_state.tray_df).copy()
+                        backup = {
+                            "RunName": tdf["RunName"].astype(str).tolist(),
+                            "X": tdf["X"].tolist(),
+                            "Y": tdf["Y"].tolist(),
+                        }
+                        st.session_state.layout_opt_backup_xy = backup
 
-                    if positions2 and isinstance(positions2, dict) and len(positions2) > 0:
-                        st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions2)
+                        st.session_state.tray_df["X"] = pd.NA
+                        st.session_state.tray_df["Y"] = pd.NA
+
+                        st.session_state.initial_layout_autosave_active = False
+
+                        st.session_state.routes_df = None
+                        st.session_state.focus_node = None
+                        st.session_state.sel_nodes = []
+                        st.session_state.sel_edges = []
+
+                        st.session_state.layout_opt_active = True
+                        st.session_state.layout_opt_last_positions = None
+                        st.session_state.layout_unsaved_hint = False
+                        st.session_state.graph_key_v += 1
+                        st.success("Physics enabled for optimization. Let it settle, then save or cancel.")
+                        st.rerun()
+                else:
+                    st.info(
+                        "Optimization is active (physics ON).\n\n"
+                        "✅ Let the graph settle, then click **Save optimized positions (turns off physics)**.\n"
+                        "↩️ Or click **Cancel optimization (turns off physics)** to revert to the previous layout."
+                    )
+
+                    if st.button("Save optimized positions (turns off physics)", key="save_opt_positions_btn", width="stretch"):
+                        positions2 = st.session_state.layout_opt_last_positions
+
+                        if positions2 and isinstance(positions2, dict) and len(positions2) > 0:
+                            st.session_state.tray_df = apply_positions_to_tray(st.session_state.tray_df, positions2)
+                            st.session_state.layout_opt_active = False
+                            st.session_state.layout_opt_last_positions = None
+                            st.session_state.layout_opt_backup_xy = None
+                            st.session_state.layout_unsaved_hint = False
+                            st.session_state.graph_key_v += 1
+                            st.success(f"Saved optimized positions for {len(positions2)} node(s). Physics is now OFF.")
+                            st.rerun()
+                        else:
+                            st.warning(
+                                "No positions were returned yet.\n\n"
+                                "✅ Wait a moment for stabilization, then click **Save optimized positions** again."
+                            )
+
+                    if st.button("Cancel optimization (turns off physics)", key="cancel_opt_btn", width="stretch"):
+                        backup = st.session_state.layout_opt_backup_xy
+                        if backup and "RunName" in backup:
+                            tdf = ensure_xy_columns(st.session_state.tray_df).copy()
+                            rn = tdf["RunName"].astype(str).tolist()
+                            bmap = {str(n).strip(): (backup["X"][i], backup["Y"][i]) for i, n in enumerate(backup["RunName"])}
+
+                            xs = []
+                            ys = []
+                            for n in rn:
+                                x, y = bmap.get(str(n).strip(), (pd.NA, pd.NA))
+                                xs.append(x)
+                                ys.append(y)
+                            tdf["X"] = xs
+                            tdf["Y"] = ys
+                            st.session_state.tray_df = tdf
+
                         st.session_state.layout_opt_active = False
                         st.session_state.layout_opt_last_positions = None
                         st.session_state.layout_opt_backup_xy = None
                         st.session_state.layout_unsaved_hint = False
                         st.session_state.graph_key_v += 1
-                        st.success(f"Saved optimized positions for {len(positions2)} node(s). Physics is now OFF.")
+                        st.success("Optimization canceled. Previous layout restored. Physics is now OFF.")
                         st.rerun()
-                    else:
-                        st.warning(
-                            "No positions were returned yet.\n\n"
-                            "✅ Wait a moment for stabilization, then click **Save optimized positions** again."
-                        )
-
-                if st.button("Cancel optimization (turns off physics)", key="cancel_opt_btn", width="stretch"):
-                    backup = st.session_state.layout_opt_backup_xy
-                    if backup and "RunName" in backup:
-                        tdf = ensure_xy_columns(st.session_state.tray_df).copy()
-                        rn = tdf["RunName"].astype(str).tolist()
-                        bmap = {str(n).strip(): (backup["X"][i], backup["Y"][i]) for i, n in enumerate(backup["RunName"])}
-
-                        xs = []
-                        ys = []
-                        for n in rn:
-                            x, y = bmap.get(str(n).strip(), (pd.NA, pd.NA))
-                            xs.append(x)
-                            ys.append(y)
-                        tdf["X"] = xs
-                        tdf["Y"] = ys
-                        st.session_state.tray_df = tdf
-
-                    st.session_state.layout_opt_active = False
-                    st.session_state.layout_opt_last_positions = None
-                    st.session_state.layout_opt_backup_xy = None
-                    st.session_state.layout_unsaved_hint = False
-                    st.session_state.graph_key_v += 1
-                    st.success("Optimization canceled. Previous layout restored. Physics is now OFF.")
-                    st.rerun()
 
             # ------------------------------------------------------------
             # Save current positions
@@ -3458,24 +3424,6 @@ with tabG:
                     save_notice_slot.info(txt)
                 else:
                     save_notice_slot.error(txt)
-
-            if st.button("Clear saved positions (blank X/Y)", key="clear_positions_btn", width="stretch"):
-                st.session_state.tray_df["X"] = pd.NA
-                st.session_state.tray_df["Y"] = pd.NA
-                st.session_state.routes_df = None
-                st.session_state.layout_opt_active = False
-                st.session_state.layout_opt_last_positions = None
-                st.session_state.layout_opt_backup_xy = None
-
-                st.session_state.initial_layout_autosave_active = True
-                st.session_state.layout_unsaved_hint = False
-
-                st.session_state.save_positions_notice = ("info", "Cleared Tray.X and Tray.Y. A fresh initial layout will lock in once on next render.")
-                st.session_state.graph_interaction_sig = None
-                st.session_state.graph_key_v += 1
-
-                st.success("Cleared Tray.X and Tray.Y (next render will lock in a fresh initial layout once).")
-                st.rerun()
 
     st.divider()
     st.caption(
