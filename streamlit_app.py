@@ -740,14 +740,19 @@ def build_demo_workbook_bytes() -> bytes:
         {"Sort": 4, "Cable number": "+CBL-0004", "equipfrom": "PANEL-D", "equipto": "PANEL-B", "Noise Level": 2, "INCLUDE": "", "EXCLUDE": ""},
     ])
 
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        tray.to_excel(writer, sheet_name="Tray", index=False)
-        connections.to_excel(writer, sheet_name="Connections", index=False)
-        endpoints.to_excel(writer, sheet_name="Endpoints", index=False)
-        cables.to_excel(writer, sheet_name="Cables(input)", index=False)
-    out.seek(0)
-    return out.getvalue()
+    # Compute routes for the demo cables to include the CableRoutes(output) sheet
+    routes_df = compute_routes_df(tray, connections, endpoints, cables)
+    
+    # Prepare dfs for export
+    dfs_for_export = {
+        "Tray": tray,
+        "Connections": connections,
+        "Endpoints": endpoints,
+        "Cables(input)": cables,
+    }
+    
+    # Write the workbook with routes included
+    return write_routed_workbook_bytes(dfs_for_export, routes_df)
 
 
 # ============================================================
