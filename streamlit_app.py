@@ -1365,9 +1365,9 @@ def apply_scale_to_nodes(tray_df: pd.DataFrame, node_names: list[str], scale_fac
     tray_df = ensure_xy_columns(tray_df)
     tray_df = tray_df.copy()
     
-    # Convert X and Y columns to float64 to avoid dtype warnings
-    tray_df["X"] = pd.to_numeric(tray_df["X"], errors="coerce")
-    tray_df["Y"] = pd.to_numeric(tray_df["Y"], errors="coerce")
+    # Convert X and Y columns to float64 explicitly
+    tray_df["X"] = pd.to_numeric(tray_df["X"], errors="coerce").astype("float64")
+    tray_df["Y"] = pd.to_numeric(tray_df["Y"], errors="coerce").astype("float64")
     
     rn_series = tray_df["RunName"].astype(str).str.strip()
     
@@ -1417,8 +1417,8 @@ def apply_scale_to_nodes(tray_df: pd.DataFrame, node_names: list[str], scale_fac
         new_rel_y = rel_y * scale_factor
         
         # Calculate new absolute position
-        tray_df.loc[idx, "X"] = center_x + new_rel_x
-        tray_df.loc[idx, "Y"] = center_y + new_rel_y
+        tray_df.at[idx, "X"] = center_x + new_rel_x
+        tray_df.at[idx, "Y"] = center_y + new_rel_y
     
     return tray_df
 
