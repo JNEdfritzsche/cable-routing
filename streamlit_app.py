@@ -1960,14 +1960,14 @@ def validate_manual_route_steps(connections_df: pd.DataFrame, nodes: list[str]) 
 # Streamlit UI
 # ============================================================
 
-st.set_page_config(page_title="Cable Routing Webapp", layout="wide")
+st.set_page_config(page_title="Chappie", layout="wide")
 
 st.markdown(
     "<style>div.block-container {padding-top: 1rem;}</style>",
     unsafe_allow_html=True,
 )
 
-st.title("Cable Routing Webapp")
+st.title("Chappie")
 
 st.sidebar.header("Workbook")
 
